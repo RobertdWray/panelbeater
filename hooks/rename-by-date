@@ -1,0 +1,23 @@
+#!/bin/sh
+# Rename a scan to a readable date. Needs nothing at all.
+#   scan-20260811-142337.pdf  ->  2026-08-11 1423.pdf
+set -eu
+pdf="$1"
+dir=$(dirname -- "$pdf")
+base=$(basename -- "$pdf" .pdf)
+
+# Prefer the stamp already in the filename over the clock, so a document keeps
+# the time it was scanned even if the hook runs much later.
+case "$base" in
+    scan-????????-??????)
+        d=${base#scan-}; day=${d%-*}; hm=${d#*-}
+        name="${day%????}-$(echo "$day" | cut -c5-6)-$(echo "$day" | cut -c7-8) $(echo "$hm" | cut -c1-4)"
+        ;;
+    *) name=$(date '+%Y-%m-%d %H%M') ;;
+esac
+
+target="$dir/$name.pdf"
+n=2
+while [ -e "$target" ]; do target="$dir/$name ($n).pdf"; n=$((n + 1)); done
+mv -n -- "$pdf" "$target"
+printf '%s\n' "$target"

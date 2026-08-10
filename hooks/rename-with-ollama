@@ -1,0 +1,175 @@
+#!/usr/bin/env python3
+# Copyright (C) 2026 Jenna Nelson
+# SPDX-License-Identifier: GPL-2.0-or-later
+"""Name a scan by asking a local LLM what the document is.
+
+Entirely optional, and the least important hook here -- start with
+rename-by-date. This exists because a model reading the OCR text produces
+names like "Origin Electricity Bill January 2025" rather than a timestamp.
+
+Needs: ocrmypdf (for the text layer), pdftotext, and ollama with a model
+pulled. Configure with:
+
+    SCANSNAP_OLLAMA_MODEL   default llama3.2
+    SCANSNAP_OLLAMA_HOST    e.g. http://server:11434, or an ssh destination
+                            if the ollama API is bound to loopback there
+
+Standalone on purpose: copy it, edit the prompt, point `hook` at your copy.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+MODEL = os.environ.get("SCANSNAP_OLLAMA_MODEL", "llama3.2")
+HOST = os.environ.get("SCANSNAP_OLLAMA_HOST", "http://127.0.0.1:11434")
+MAX_CHARS = 6000
+MAX_NAME = 120
+
+PROMPT = """\
+You are naming a scanned document from its OCR text.
+
+Reply with ONLY the filename. No extension, no quotes, no explanation.
+
+Rules:
+- At most about 5 significant words, plus a date.
+- Filler words (for, to, the, of, a, and) do not count towards the 5.
+- Say who the document is about or from -- the company or person's name.
+- Say what kind of document it is (Bill, Receipt, Referral, Statement, Notes).
+- If the document shows a date, put it at the end, in the form the document
+  uses: "June 2026", "January 2025", "10 May 2024".
+- If there is NO date in the document, leave the date out entirely.
+- Use ordinary capitalisation and spaces. No slashes, no underscores.
+- ALWAYS put a space between words. Never run words together.
+- Only use a date that actually appears in the document. Never guess a year
+  from context, and never invent one. No date is better than a wrong date.
+- If the text is too garbled or generic to identify, reply exactly: UNKNOWN
+
+OCR text follows:
+---
+{text}
+---
+Filename:"""
+
+
+def pdf_text(path: Path) -> str:
+    if not shutil.which("pdftotext"):
+        print("pdftotext not installed", file=sys.stderr)
+        return ""
+    try:
+        out = subprocess.run(
+            ["pdftotext", "-l", "3", str(path), "-"],
+            capture_output=True, text=True, timeout=60,
+        )  # fmt: skip
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(f"cannot read text: {exc}", file=sys.stderr)
+        return ""
+    return re.sub(r"\n{3,}", "\n\n", out.stdout).strip()[:MAX_CHARS]
+
+
+def ask(prompt: str) -> str:
+    """Ask ollama. Over HTTP normally, or through ssh for a loopback-only host."""
+    body = json.dumps({"model": MODEL, "prompt": prompt, "stream": False}).encode()
+    if "://" not in HOST:
+        # Treat it as an ssh destination: many people bind ollama to loopback,
+        # which is the sensible default and means it cannot be called directly.
+        try:
+            r = subprocess.run(
+                ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", HOST,
+                 "curl -sS --max-time 300 -X POST localhost:11434/api/generate "
+                 "-H 'Content-Type: application/json' --data-binary @-"],
+                input=body, capture_output=True, timeout=330,
+            )  # fmt: skip
+        except (OSError, subprocess.SubprocessError) as exc:
+            print(f"ssh to {HOST} failed: {exc}", file=sys.stderr)
+            return ""
+        if r.returncode != 0:
+            print(f"{HOST}: {r.stderr.decode('utf-8', 'replace')[:200]}", file=sys.stderr)
+            return ""
+        raw = r.stdout
+    else:
+        req = urllib.request.Request(
+            f"{HOST.rstrip('/')}/api/generate", data=body,
+            headers={"Content-Type": "application/json"},
+        )  # fmt: skip
+        try:
+            with urllib.request.urlopen(req, timeout=300) as resp:
+                raw = resp.read()
+        except (urllib.error.URLError, OSError) as exc:
+            print(f"ollama at {HOST} unreachable: {exc}", file=sys.stderr)
+            return ""
+    try:
+        return str(json.loads(raw.decode("utf-8", "replace")).get("response", ""))
+    except json.JSONDecodeError as exc:
+        print(f"unparseable reply: {exc}", file=sys.stderr)
+        return ""
+
+
+def clean_name(raw: str) -> str:
+    """Model output -> a safe filename component.
+
+    Filtered to a known-good set rather than merely having bad characters
+    removed: this is untrusted text on its way to the filesystem, so nothing
+    that could climb a directory or hide as a dotfile survives.
+    """
+    name = ""
+    for line in raw.replace("\r", "\n").split("\n"):
+        line = line.strip().strip("\"'`*")
+        line = re.sub(r"^(filename|name|title)\s*[:\-]\s*", "", line, flags=re.I)
+        if line:
+            name = line
+            break
+    name = re.sub(r"[\x00-\x1f\x7f]", "", name)
+    name = re.sub(r"[^A-Za-z0-9 \-_&(),.']", " ", name)
+    name = re.sub(r"\s+", " ", name).strip(" .-_")
+    # Models sometimes ignore the spacing rule and return
+    # "LordMayorHousingPlan2026". Only unpick it when there is no space at all,
+    # which means the rule was ignored outright -- splitting a name that
+    # already has spaces would maul words like "McDonald".
+    if " " not in name and len(name) > 12:
+        name = re.sub(r"(?<=[a-z])(?=[A-Z])|(?<=[a-z])(?=\d)", " ", name)
+    name = re.sub(r"(?<=\d)(?=[A-Z])", " ", name)
+    if name.lower().endswith(".pdf"):
+        name = name[:-4].strip()
+    return name[:MAX_NAME].strip()
+
+
+def main() -> int:
+    if len(sys.argv) < 2:
+        print("usage: rename-with-ollama <file.pdf>", file=sys.stderr)
+        return 2
+    path = Path(sys.argv[1])
+    if not path.is_file():
+        print(f"no such file: {path}", file=sys.stderr)
+        return 1
+
+    text = pdf_text(path)
+    if len(text) < 20:
+        print("too little text to name from (is ocrmypdf installed?)", file=sys.stderr)
+        return 1
+
+    name = clean_name(ask(PROMPT.format(text=text)))
+    if not name or name.upper() == "UNKNOWN":
+        print("no usable name", file=sys.stderr)
+        return 1
+
+    target = path.with_name(f"{name}{path.suffix}")
+    n = 2
+    while target.exists():
+        target = path.with_name(f"{name} ({n}){path.suffix}")
+        n += 1
+    path.rename(target)
+    print(target)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

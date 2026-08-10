@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.ruff_cache/
+build/
+dist/
+*.egg-info/
+# Packet captures are how this was worked out, but they contain scanned
+# documents and network detail from a real household. They are not distributed.
+captures/
+*.pcap
+*.pcapng

@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "scansnap-linux"
+version = "0.1.0"
+description = "Scan from a ScanSnap iX1500's own touch panel on Linux, without vendor software"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "GPL-2.0-or-later" }
+authors = [{ name = "Jenna Nelson" }]
+keywords = ["scanner", "scansnap", "fujitsu", "ix1500", "sane", "adf"]
+classifiers = [
+    "License :: OSI Approved :: GNU General Public License v2 or later (GPLv2+)",
+    "Operating System :: POSIX :: Linux",
+    "Topic :: Multimedia :: Graphics :: Capture :: Scanners",
+]
+# The scan path itself is stdlib-only, on purpose: a scanner you can only use
+# after installing a dependency tree is a scanner you cannot use on a fresh
+# machine. Everything below is optional and degrades to a clear message.
+dependencies = []
+
+[project.optional-dependencies]
+# Combine sides into one PDF without re-encoding the JPEGs.
+pdf = ["img2pdf"]
+# Drop the blank reverse of one-sided paper.
+blank = ["pillow", "numpy"]
+full = ["img2pdf", "pillow", "numpy"]
+
+[project.scripts]
+scansnap = "scansnap.cli:main"
+
+[tool.setuptools]
+packages = ["scansnap"]

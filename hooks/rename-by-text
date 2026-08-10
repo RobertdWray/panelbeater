@@ -1,0 +1,31 @@
+#!/bin/sh
+# Name a scan after the first meaningful line of its text layer.
+# Needs pdftotext (poppler-utils). Does nothing if there is no text layer,
+# which is the case unless ocrmypdf is installed.
+set -eu
+pdf="$1"
+dir=$(dirname -- "$pdf")
+
+command -v pdftotext >/dev/null 2>&1 || { echo "pdftotext not installed" >&2; exit 1; }
+
+# First line of 4+ characters that is not just digits or punctuation.
+line=$(pdftotext -l 1 -- "$pdf" - 2>/dev/null \
+    | tr -d '\r' \
+    | grep -m1 -E '[A-Za-z]{4}' \
+    | cut -c1-60 || true)
+[ -n "${line:-}" ] || { echo "no usable text" >&2; exit 1; }
+
+# Filter to a known-good set rather than removing the characters we happened to
+# think of: this is untrusted text on its way to becoming a filename. Strips
+# path separators, control characters and any leading dot.
+name=$(printf '%s' "$line" \
+    | tr -cd 'A-Za-z0-9 ._&(),-' \
+    | sed -e 's/[[:space:]]\{1,\}/ /g' -e 's/^[ .-]*//' -e 's/[ .-]*$//')
+[ -n "$name" ] || { echo "nothing left after filtering" >&2; exit 1; }
+
+name="$name $(date '+%Y-%m-%d')"
+target="$dir/$name.pdf"
+n=2
+while [ -e "$target" ]; do target="$dir/$name ($n).pdf"; n=$((n + 1)); done
+mv -n -- "$pdf" "$target"
+printf '%s\n' "$target"
