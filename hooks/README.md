@@ -6,8 +6,8 @@ it always works, needs nothing installed, and never loses a document.
 If you want better names, point `hook` at a program:
 
 ```ini
-[scansnap]
-hook = ~/.config/scansnap/hooks/rename-by-date
+[panelbeater]
+hook = ~/.config/panelbeater/hooks/rename-by-date
 ```
 
 **No LLM is required.** A hook is any executable. The examples here range from
@@ -17,7 +17,7 @@ people should start with.
 ## The contract
 
 * The hook is run with **one argument**: the absolute path of the finished PDF.
-  It is also in `$SCANSNAP_PDF`.
+  It is also in `$PANELBEATER_PDF`.
 * The file is in the **staging directory**, not the output directory. Nothing
   is watching it there, so you can take your time.
 * The hook may **rename or move the file within that directory**.
@@ -28,7 +28,7 @@ people should start with.
 * A non-zero exit, a timeout (`hook_timeout`, default 300s), or a path that
   does not exist is **ignored**, and the document keeps its timestamp name.
 
-Then scansnap moves the result into `output_dir`.
+Then panelbeater moves the result into `output_dir`.
 
 A hook that *fails* cannot lose a scan: a non-zero exit, a crash, a timeout, or
 a nonsense path all fall back to filing the document under the name it already
@@ -37,7 +37,7 @@ the document. That case is reported rather than hidden, but nothing can bring
 the file back, so do not `rm` in a hook.
 
 A path printed by the hook is only believed if it is inside the staging
-directory. Otherwise scansnap would file whatever the hook happened to name.
+directory. Otherwise panelbeater would file whatever the hook happened to name.
 
 ## Why the staging directory exists
 

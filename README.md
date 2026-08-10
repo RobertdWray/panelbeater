@@ -1,4 +1,4 @@
-# scansnap-linux
+# panelbeater
 
 Press the Scan button on a ScanSnap iX1500 and have the page arrive on your
 Linux machine. No vendor software, no Windows VM.
@@ -10,8 +10,8 @@ scanner becomes a plain USB device you have to drive from the keyboard. This
 implements the protocol the panel actually speaks, so the button works again.
 
 ```
-$ scansnap enrol
-$ systemctl --user enable --now scansnap
+$ panelbeater enrol
+$ systemctl --user enable --now panelbeater
 ```
 
 Then press Scan. A searchable PDF appears in `~/Documents/Scans`.
@@ -21,8 +21,10 @@ platform and will probably work — reports welcome.
 
 ## What works
 
-- The Scan button on the panel starts a scan on your machine
-- Multi-sheet batches from the ADF, duplex, 300 dpi colour
+- The Scan button on the panel starts a scan on your machine, over **Wi-Fi or
+  USB**
+- Multi-sheet batches from the ADF, duplex; 300 dpi colour over the
+  network, adjustable over USB
 - Blank reverse sides dropped automatically
 - Combined into one PDF, with a text layer if `ocrmypdf` is installed
 - Filed into a directory you choose, with an optional rename hook
@@ -30,15 +32,16 @@ platform and will probably work — reports welcome.
 
 ## What does not
 
-- **Resolution is fixed at 300 dpi colour** over the network. The parameter
-  block that sets it is only partly decoded; see `docs/PROTOCOL.md`.
+- **Resolution is fixed at 300 dpi colour over the network.** The parameter
+  block that sets it is only partly decoded; see `docs/PROTOCOL.md`. Over USB
+  it is adjustable.
 - **Wi-Fi has to be configured on the panel itself.** The credentials are typed
   on the scanner and never cross the wire, so no host tool can do it.
 - **Which host the panel points at is chosen on the panel.** A host can add
   itself to the list but cannot select itself; those writes are accepted and
   ignored by the scanner.
-- Scanning over USB is not part of this package. See
-  [Scanning over USB](#scanning-over-usb).
+- **USB and SANE cannot both have the scanner.** Only one process can claim the
+  interface. See [Scanning over USB](#scanning-over-usb).
 
 ## Requirements
 
@@ -51,6 +54,10 @@ optional and degrades to a clear message rather than a traceback:
 | one PDF instead of loose JPEGs | `img2pdf`, or Pillow | you get the JPEGs |
 | dropping blank reverse sides | Pillow and numpy | every side is kept |
 | a searchable text layer | `ocrmypdf` | the PDF has no text layer |
+| scanning over USB | `pyusb`, Pillow, numpy | the network path still works |
+
+That is true of the **network** path. Scanning over USB does need `pyusb` and
+an image library, because the scanner sends raw data there rather than JPEG.
 
 ## Install
 
@@ -68,10 +75,10 @@ There is a `pyproject.toml` if you prefer `pip install .`.
 ## Set up
 
 ```sh
-scansnap config --write     # a config file to edit, at ~/.config/scansnap/config
-scansnap discover           # find the scanner
-scansnap enrol              # add this machine to its host list
-scansnap status             # check what the scanner thinks
+panelbeater config --write     # a config file to edit, at ~/.config/panelbeater/config
+panelbeater discover           # find the scanner
+panelbeater enrol              # add this machine to its host list
+panelbeater status             # check what the scanner thinks
 ```
 
 `enrol` puts your machine in the scanner's list under a name you choose. Then,
@@ -79,22 +86,23 @@ scansnap status             # check what the scanner thinks
 machine** — that part cannot be done from the computer.
 
 ```sh
-systemctl --user enable --now scansnap
+systemctl --user enable --now panelbeater
 loginctl enable-linger $USER    # so it runs when you are not logged in
 ```
 
-`scansnap status` is the thing to run when something is wrong: it prints the
+`panelbeater status` is the thing to run when something is wrong: it prints the
 config it loaded, whether the scanner is reachable, whether there is paper, and
 every host the scanner knows about with the selected one marked.
 
 ## Configuration
 
-`~/.config/scansnap/config`, or `/etc/scansnap/config`, or `$SCANSNAP_CONFIG`.
-Every key can also be set as `SCANSNAP_<KEY>` in the environment, which is how
+`~/.config/panelbeater/config`, or `/etc/panelbeater/config`, or `$PANELBEATER_CONFIG`.
+Every key can also be set as `PANELBEATER_<KEY>` in the environment, which is how
 to override things in the systemd unit without editing it.
 
 ```ini
-[scansnap]
+[panelbeater]
+transport = auto            # network, usb, or auto (USB if the cable is there)
 scanner = auto              # or an IP; auto discovers, which takes a few seconds
 name =                      # how this host appears on the panel; default hostname
 output_dir = ~/Documents/Scans
@@ -137,14 +145,43 @@ watcher never sees a partial file.
 
 ## Scanning over USB
 
-Not included here. The catch is that the two are mutually exclusive: while the
-registration that keeps the panel alive is active, USB scanning fails with
-`SANE_STATUS_IO_ERROR`. You can have the panel or you can have `scanimage`, and
-this package chooses the panel.
+Works too, and for a lot of people it is the better option:
 
-If you want USB scanning, use the existing SANE `fujitsu` backend and do not
-run this daemon. `docs/PROTOCOL.md` documents the USB side too, including the
-`SET WINDOW` two-descriptor requirement that makes duplex work.
+```ini
+[panelbeater]
+transport = usb        # or auto, which uses USB when the cable is there
+```
+
+**USB needs no enrolment, no host list and no Wi-Fi.** `SEND DIAGNOSTIC` has no
+registration concept, so it works on a scanner straight out of the box — no
+`panelbeater enrol`, and nothing to tap on the panel. If you just want the
+button to work, plug the cable in and set `transport = usb`.
+
+It also does resolution and colour mode, which the network path cannot:
+
+```ini
+resolution = 300       # or 150, 600
+mode = color           # or gray, lineart
+simplex = no
+```
+
+Needs `pyusb`, plus Pillow and numpy to decode the image. Scanning is done
+in-process rather than by shelling out to `scanimage`, because handing the
+device over for the duration of a scan means being blind to the Stop button and
+to errors.
+
+**The catch: it is mutually exclusive with SANE.** Only one process can claim
+the USB interface, so while panelbeater is running `scanimage` fails at open
+with "Invalid argument", and while a SANE scan is in progress panelbeater
+cannot poll the button. If you need both, use `transport = network` and leave
+USB to SANE.
+
+You will probably need a udev rule to open the device without root:
+
+```
+# /etc/udev/rules.d/60-panelbeater.rules
+SUBSYSTEM=="usb", ATTR{idVendor}=="04c5", ATTR{idProduct}=="159f", MODE="0664", TAG+="uaccess"
+```
 
 ## For protocol implementers
 

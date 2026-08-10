@@ -392,7 +392,19 @@ endpoints `0x02` OUT and `0x81` IN.
 
 Scanning over USB uses the ordinary Fujitsu sequence — `MODE SELECT` pages,
 `SET WINDOW`, gamma tables via `WRITE`, `OBJECT POSITION` to feed, `SCAN`, then
-`READ` — and works, but note:
+`READ` — and works. Unlike the network path it needs no registration and no
+host list at all, so it works on a scanner out of the box, and resolution and
+colour mode are adjustable.
+
+A warning from experience: **replay the captured setup rather than
+reconstructing it.** Every constant that got hand-typed from a capture here was
+truncated, and the failures did not look like truncation. The worst was `SET
+WINDOW`: the payload is 136 bytes, an 8-byte header and **two** 64-byte window
+descriptors, one per side. A version with a single descriptor is accepted, and
+then duplex stalls in a way that reads as a transport bug. Patch fields into
+the captured bytes; do not retype them.
+
+Other things worth knowing:
 
 * `SET WINDOW` carries **two** 64-byte window descriptors, one per side.
   Sending one descriptor makes duplex stall in a way that looks like a

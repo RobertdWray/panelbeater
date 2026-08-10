@@ -18,6 +18,37 @@ from .scanning import scan_to_dir
 from .session import Session
 
 
+def usb_present() -> bool:
+    """Is the scanner on the USB bus? Checked via sysfs, so it costs nothing
+    and does not need pyusb or a claim on the device."""
+    from pathlib import Path as _P
+
+    for f in _P("/sys/bus/usb/devices").glob("*/idProduct"):
+        try:
+            if f.read_text().strip() != "159f":
+                continue
+            if (f.parent / "idVendor").read_text().strip() == "04c5":
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def pick_transport(cfg: Config, override: str = "") -> str:
+    """network or usb. `auto` prefers USB, which needs no enrolment."""
+    want = (override or cfg.get("transport", "auto")).strip().lower()
+    if want in ("network", "usb"):
+        return want
+    from . import usb as usbmod
+
+    if usb_present() and usbmod.available():
+        return "usb"
+    if usb_present():
+        print("scanner is on USB but pyusb is not installed; using the network",
+              file=sys.stderr)  # fmt: skip
+    return "network"
+
+
 def resolve_scanner(cfg: Config, override: str = "") -> str:
     addr = (override or cfg.get("scanner", "auto")).strip()
     if addr and addr.lower() != "auto":
@@ -74,7 +105,7 @@ def cmd_status(args, cfg: Config) -> int:
             mine = "  (this machine)" if u.get("host_id") == cfg.host_id else ""
             print(f"    {u.get('host_id')}  {u.get('name')!r}{mine}{mark}")
         if cfg.host_id not in [u.get("host_id") for u in users]:
-            print("\nthis machine is NOT enrolled; run:  scansnap enrol")
+            print("\nthis machine is NOT enrolled; run:  panelbeater enrol")
     profs = doc.get("profiles", [])
     if profs:
         print(f"profiles:  {', '.join(repr(p.get('prof_name')) for p in profs)}")
@@ -100,8 +131,10 @@ def cmd_enrol(args, cfg: Config) -> int:
 
 
 def cmd_scan(args, cfg: Config) -> int:
+    if pick_transport(cfg, args.transport) == "usb":
+        return scan_over_usb(cfg)
     host = resolve_scanner(cfg, args.scanner)
-    work = Path(tempfile.mkdtemp(prefix="scansnap-"))
+    work = Path(tempfile.mkdtemp(prefix="panelbeater-"))
     try:
         n = scan_to_dir(
             host,
@@ -128,9 +161,33 @@ def cmd_scan(args, cfg: Config) -> int:
             pass
 
 
+def scan_over_usb(cfg: Config) -> int:
+    """One scan over USB, arming the panel first so the scanner is willing."""
+    from .usb.daemon import arm, scan_once, user_id_from_scanner
+    from .usb.panel import Panel
+    from .usb.transport import Ix1500, ScannerAbsent, ScannerBusy
+
+    try:
+        dev = Ix1500()
+    except (ScannerAbsent, ScannerBusy) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    uid = cfg.get("user_id") or user_id_from_scanner(Panel(dev))
+    if uid:
+        arm(dev, uid)
+    scan_once(cfg, dev)
+    return 0
+
+
 def cmd_serve(args, cfg: Config) -> int:
+    if pick_transport(cfg, args.transport) == "usb":
+        from .usb.daemon import serve as usb_serve
+
+        print("transport: usb")
+        return usb_serve(cfg)
     from .daemon import serve
 
+    print("transport: network")
     host = resolve_scanner(cfg, args.scanner)
     return serve(cfg, host)
 
@@ -138,7 +195,7 @@ def cmd_serve(args, cfg: Config) -> int:
 def cmd_config(args, cfg: Config) -> int:
     if args.show:
         print(f"# loaded from: {cfg.source or '(defaults only)'}")
-        print("[scansnap]")
+        print("[panelbeater]")
         for k in sorted(cfg.values):
             print(f"{k} = {cfg.values[k]}")
         return 0
@@ -150,9 +207,9 @@ def cmd_config(args, cfg: Config) -> int:
     from .config import DEFAULTS
 
     lines = [
-        "# scansnap configuration",
-        "# Every key can also be set as SCANSNAP_<KEY> in the environment.",
-        "[scansnap]",
+        "# panelbeater configuration",
+        "# Every key can also be set as PANELBEATER_<KEY> in the environment.",
+        "[panelbeater]",
     ]
     for k, v in DEFAULTS.items():
         if k == "host_id" and not v:
@@ -168,12 +225,18 @@ def cmd_config(args, cfg: Config) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
-        prog="scansnap",
+        prog="panelbeater",
         description="Scan from a ScanSnap iX1500's own touch panel, on Linux.",
     )
     ap.add_argument("--config", help="config file to use")
     ap.add_argument(
         "--scanner", default="", help="scanner IP (default: config, or discover)"
+    )
+    ap.add_argument(
+        "--transport",
+        default="",
+        choices=["", "network", "usb"],
+        help="override the configured transport",
     )
     sub = ap.add_subparsers(dest="cmd", required=True)
 
@@ -197,7 +260,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--prof-id", default="")
     p.add_argument("--max-sheets", type=int, default=0)
     p.add_argument("--skip-register", action="store_true",
-                   help="a running `scansnap serve` already holds the registration")  # fmt: skip
+                   help="a running `panelbeater serve` already holds the registration")  # fmt: skip
     p.set_defaults(func=cmd_scan)
 
     p = sub.add_parser("serve", help="keep the panel alive and scan on button press")
@@ -216,7 +279,7 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         return 130
     except OSError as exc:
-        print(f"scansnap: {exc}", file=sys.stderr)
+        print(f"panelbeater: {exc}", file=sys.stderr)
         return 1
 
 

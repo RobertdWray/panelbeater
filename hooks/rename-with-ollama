@@ -10,8 +10,8 @@ names like "Origin Electricity Bill January 2025" rather than a timestamp.
 Needs: ocrmypdf (for the text layer), pdftotext, and ollama with a model
 pulled. Configure with:
 
-    SCANSNAP_OLLAMA_MODEL   default llama3.2
-    SCANSNAP_OLLAMA_HOST    e.g. http://server:11434, or an ssh destination
+    PANELBEATER_OLLAMA_MODEL   default llama3.2
+    PANELBEATER_OLLAMA_HOST    e.g. http://server:11434, or an ssh destination
                             if the ollama API is bound to loopback there
 
 Standalone on purpose: copy it, edit the prompt, point `hook` at your copy.
@@ -29,8 +29,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-MODEL = os.environ.get("SCANSNAP_OLLAMA_MODEL", "llama3.2")
-HOST = os.environ.get("SCANSNAP_OLLAMA_HOST", "http://127.0.0.1:11434")
+MODEL = os.environ.get("PANELBEATER_OLLAMA_MODEL", "llama3.2")
+HOST = os.environ.get("PANELBEATER_OLLAMA_HOST", "http://127.0.0.1:11434")
 MAX_CHARS = 6000
 MAX_NAME = 120
 

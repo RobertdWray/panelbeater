@@ -1,6 +1,6 @@
 [Unit]
 Description=ScanSnap panel scanning (keeps the touch panel enabled)
-Documentation=https://github.com/CHANGEME/scansnap-linux
+Documentation=https://github.com/CHANGEME/panelbeater
 # The scanner is on the network, so do not start before it can be reached.
 After=network-online.target
 Wants=network-online.target
@@ -19,9 +19,9 @@ StandardError=journal
 
 # Everything machine-specific belongs in the config file, not here. Any setting
 # can still be forced with an override if you want to, for example:
-#   systemctl --user edit scansnap
+#   systemctl --user edit panelbeater
 #   [Service]
-#   Environment=SCANSNAP_OUTPUT_DIR=%h/Documents/Inbox
+#   Environment=PANELBEATER_OUTPUT_DIR=%h/Documents/Inbox
 
 [Install]
 WantedBy=default.target

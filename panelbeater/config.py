@@ -7,11 +7,11 @@ addresses or identifiers belonging to whoever happened to write it.
 
 Search order, first match wins:
 
-    $SCANSNAP_CONFIG
-    $XDG_CONFIG_HOME/scansnap/config   (default ~/.config/scansnap/config)
-    /etc/scansnap/config
+    $PANELBEATER_CONFIG
+    $XDG_CONFIG_HOME/panelbeater/config   (default ~/.config/panelbeater/config)
+    /etc/panelbeater/config
 
-Any setting can be overridden with SCANSNAP_<KEY> in the environment, which is
+Any setting can be overridden with PANELBEATER_<KEY> in the environment, which is
 what makes the systemd unit configurable without editing it.
 """
 
@@ -23,9 +23,15 @@ import os
 import socket
 from pathlib import Path
 
-SECTION = "scansnap"
+SECTION = "panelbeater"
 
 DEFAULTS: dict[str, str] = {
+    # network, usb, or auto. USB needs no enrolment and no Wi-Fi, but it is
+    # mutually exclusive with SANE: only one process can claim the interface,
+    # so scanimage cannot open the scanner while panelbeater is running.
+    # `auto` uses USB if the cable is there and pyusb is installed, else the
+    # network.
+    "transport": "auto",
     # Scanner address. "auto" broadcasts for it, which is slower but survives
     # DHCP moving the scanner.
     "scanner": "auto",
@@ -49,7 +55,7 @@ DEFAULTS: dict[str, str] = {
     "blank_removal": "yes",
     "blank_threshold": "0.5",
     # Which of the scanner's profiles to scan with. Blank uses the first one.
-    # `scansnap status` lists them; the ids come from the scanner, not from here.
+    # `panelbeater status` lists them; the ids come from the scanner, not from here.
     "prof_id": "",
     # Safety cap on a single batch; the batch normally ends when the hopper
     # empties.
@@ -57,19 +63,34 @@ DEFAULTS: dict[str, str] = {
     # Seconds between registrations. The panel goes dead if nobody is
     # registered, so this is also the keep-alive.
     "interval": "15",
-    # Milliseconds between button polls.
+    # Milliseconds between button polls (network).
     "poll": "200",
+    # Milliseconds between button polls over USB. Much faster, because a press
+    # can be visible for as little as one poll and a job left unanswered goes
+    # stale.
+    "poll_usb": "50",
+    # Seconds between re-arming the panel over USB; 0 disables. Cheap insurance
+    # in case the panel loses the session.
+    "rearm": "300",
+    # USB only: the network path is fixed at 300 dpi colour because its
+    # parameter block is not fully decoded.
+    "resolution": "300",
+    "mode": "color",
+    "simplex": "no",
+    # The 32-hex id the panel acts as. Read from the scanner's profiles when
+    # blank, which is almost always right.
+    "user_id": "",
 }
 
 
 def config_paths() -> list[Path]:
-    env = os.environ.get("SCANSNAP_CONFIG")
+    env = os.environ.get("PANELBEATER_CONFIG")
     if env:
         return [Path(env)]
     xdg = os.environ.get("XDG_CONFIG_HOME") or "~/.config"
     return [
-        Path(xdg).expanduser() / "scansnap" / "config",
-        Path("/etc/scansnap/config"),
+        Path(xdg).expanduser() / "panelbeater" / "config",
+        Path("/etc/panelbeater/config"),
     ]
 
 
@@ -108,7 +129,7 @@ class Config:
         for p in candidates:
             if p.is_file():
                 parser = configparser.ConfigParser()
-                # Tolerate a bare key=value file with no [scansnap] header.
+                # Tolerate a bare key=value file with no [panelbeater] header.
                 text = p.read_text()
                 if f"[{SECTION}]" not in text:
                     text = f"[{SECTION}]\n" + text
@@ -119,7 +140,7 @@ class Config:
         # Environment always wins, so a unit file or a one-off run can override
         # without touching the config.
         for key in DEFAULTS:
-            env = os.environ.get(f"SCANSNAP_{key.upper()}")
+            env = os.environ.get(f"PANELBEATER_{key.upper()}")
             if env is not None:
                 values[key] = env
         return cls(values, found)

@@ -137,7 +137,7 @@ def run_hook(
             capture_output=True,
             text=True,
             timeout=timeout,
-            env={**os.environ, "SCANSNAP_PDF": str(path)},
+            env={**os.environ, "PANELBEATER_PDF": str(path)},
         )
     except (subprocess.SubprocessError, OSError) as exc:
         log(f"  hook failed: {str(exc)[:160]}")

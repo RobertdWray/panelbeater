@@ -238,7 +238,7 @@ def capture(
     Kept separate from post-processing so the daemon can go straight back to
     registering while the document is assembled and named.
     """
-    work = Path(tempfile.mkdtemp(prefix="scansnap-"))
+    work = Path(tempfile.mkdtemp(prefix="panelbeater-"))
     try:
         n = scan_to_dir(
             host,

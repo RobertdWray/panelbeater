@@ -1,0 +1,9 @@
+# Let a logged-in user open the ScanSnap iX1500 without root, which the USB
+# transport needs. uaccess grants it to whoever is at the seat; the 0664 mode
+# is the fallback for systems without logind.
+#
+#   sudo cp udev/60-panelbeater.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload && sudo udevadm trigger
+#
+# Not needed for the network transport.
+SUBSYSTEM=="usb", ATTR{idVendor}=="04c5", ATTR{idProduct}=="159f", MODE="0664", TAG+="uaccess"

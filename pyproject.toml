@@ -3,7 +3,7 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "scansnap-linux"
+name = "panelbeater"
 version = "0.1.0"
 description = "Scan from a ScanSnap iX1500's own touch panel on Linux, without vendor software"
 readme = "README.md"
@@ -26,10 +26,12 @@ dependencies = []
 pdf = ["img2pdf"]
 # Drop the blank reverse of one-sided paper.
 blank = ["pillow", "numpy"]
-full = ["img2pdf", "pillow", "numpy"]
+# Scanning over USB instead of the network.
+usb = ["pyusb", "pillow", "numpy"]
+full = ["img2pdf", "pillow", "numpy", "pyusb"]
 
 [project.scripts]
-scansnap = "scansnap.cli:main"
+panelbeater = "panelbeater.cli:main"
 
 [tool.setuptools]
-packages = ["scansnap"]
+packages = ["panelbeater", "panelbeater.usb"]
