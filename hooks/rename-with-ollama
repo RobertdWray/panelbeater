@@ -128,7 +128,10 @@ def clean_name(raw: str) -> str:
             name = line
             break
     name = re.sub(r"[\x00-\x1f\x7f]", "", name)
-    name = re.sub(r"[^A-Za-z0-9 \-_&(),.']", " ", name)
+    # The prompt asks for spaces, but models return snake_case often enough
+    # that it is worth enforcing rather than asking twice.
+    name = name.replace("_", " ")
+    name = re.sub(r"[^A-Za-z0-9 \-&(),.']", " ", name)
     name = re.sub(r"\s+", " ", name).strip(" .-_")
     # Models sometimes ignore the spacing rule and return
     # "LordMayorHousingPlan2026". Only unpick it when there is no space at all,

@@ -65,6 +65,13 @@ def serve(cfg: Config, host: str, log=print) -> int:
         Both paths can see the same press, so this has to be idempotent. `busy`
         stops them overlapping; the cooldown stops the poll re-firing on a
         scan_sw that is still set when the scan returns.
+
+        Only the part that talks to the scanner is serialised here. Assembly,
+        OCR and the rename hook go to a worker thread, because they can take
+        minutes -- the hook is allowed 300s by default -- and this loop must get
+        back to registering. The panel goes dead about a minute after the last
+        registration, so post-processing inline would switch the scanner off
+        while naming the document it had just produced.
         """
         if not busy.acquire(blocking=False):
             return
@@ -73,10 +80,20 @@ def serve(cfg: Config, host: str, log=print) -> int:
                 return
             detail = "" if paper is None else f" (paper_loaded={paper})"
             log(f"[{stamp()}] SCAN BUTTON PRESSED via {source}{detail}")
-            run_one(cfg, host, host_id, log=log)
+            pages, work = capture(cfg, host, host_id, log=log)
         finally:
             last_done[0] = time.monotonic()
             busy.release()
+        if pages:
+            # NOT a daemon thread: a restart should wait for naming to finish
+            # rather than abandon it. The PDF is written to staging before the
+            # hook runs, so even a hard kill leaves a recoverable document
+            # there, and the next start files it.
+            threading.Thread(
+                target=postprocess, args=(cfg, pages, work), kwargs={"log": log}
+            ).start()
+        elif work:
+            cleanup(work)
 
     def notice_server():
         """Listen for the scanner's UDP notices.
@@ -132,6 +149,8 @@ def serve(cfg: Config, host: str, log=print) -> int:
                     log(f"[{stamp()}] ignored: op=0x{op:02x} is not a button press")
 
     threading.Thread(target=notice_server, daemon=True).start()
+
+    file_orphans(cfg, log=log)
 
     log(f"registering every {interval:.0f}s as host_id {host_id} ({ip})")
     intent_note = [False]
@@ -199,8 +218,26 @@ def serve(cfg: Config, host: str, log=print) -> int:
     return 0
 
 
-def run_one(cfg: Config, host: str, host_id: str, log=print) -> Path | None:
-    """One scan, from button press to filed document."""
+def cleanup(work: Path) -> None:
+    for p in work.glob("*"):
+        try:
+            p.unlink()
+        except OSError:
+            pass
+    try:
+        os.rmdir(work)
+    except OSError:
+        pass
+
+
+def capture(
+    cfg: Config, host: str, host_id: str, log=print
+) -> tuple[list[str], Path | None]:
+    """The scanner-bound half: pull the pages off the ADF and stop.
+
+    Kept separate from post-processing so the daemon can go straight back to
+    registering while the document is assembled and named.
+    """
     work = Path(tempfile.mkdtemp(prefix="scansnap-"))
     try:
         n = scan_to_dir(
@@ -209,21 +246,43 @@ def run_one(cfg: Config, host: str, host_id: str, log=print) -> Path | None:
             str(work / "page"),
             prof_id=cfg.get("prof_id"),
             max_sheets=int(cfg.num("max_sheets", 100)),
-            skip_register=True,  # the daemon already holds it
+            skip_register=True,  # the daemon already holds the registration
             log=log,
         )
-        if not n:
-            log("  nothing scanned")
-            return None
-        pages = sorted(str(p) for p in work.glob("page-*.jpg"))
+    except OSError as exc:
+        log(f"  scan failed: {exc}")
+        return [], work
+    if not n:
+        log("  nothing scanned")
+        return [], work
+    return sorted(str(p) for p in work.glob("page-*.jpg")), work
+
+
+def postprocess(cfg: Config, pages: list[str], work: Path | None, log=print):
+    """Assemble, OCR, name and file. Runs off the registration loop."""
+    try:
         return output.finish(pages, time.strftime("%Y%m%d-%H%M%S"), cfg, log=log)
+    except Exception as exc:  # noqa: BLE001 -- a worker must never die silently
+        log(f"  post-processing failed: {type(exc).__name__}: {exc}")
+        return None
     finally:
-        for p in work.glob("*"):
-            try:
-                p.unlink()
-            except OSError:
-                pass
+        if work:
+            cleanup(work)
+
+
+def file_orphans(cfg: Config, log=print) -> None:
+    """File anything left in staging by a previous run.
+
+    A restart during OCR or a rename hook leaves a finished PDF in staging that
+    nothing is watching, so it would sit there unnoticed. It is already a
+    complete document; file it under the name it has.
+    """
+    staging = cfg.staging_dir
+    if not staging.is_dir():
+        return
+    for p in sorted(staging.glob("*.pdf")):
+        log(f"[{stamp()}] filing {p.name}, left over from a previous run")
         try:
-            os.rmdir(work)
-        except OSError:
-            pass
+            output.deliver(p, cfg.output_dir, log=log)
+        except OSError as exc:
+            log(f"  could not file it: {exc}")
