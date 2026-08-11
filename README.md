@@ -207,6 +207,13 @@ mode = color           # or gray, lineart
 simplex = no
 ```
 
+Known rough edge: each side is read until a 42 MB safety ceiling rather than
+stopping cleanly at the end of the page, so a scan moves about 42 MB per side
+over USB where the network path moves under 1 MB of ready-made JPEG. It works
+and it is not slow in practice — nine seconds for a duplex sheet — but the
+end-of-page detection is clearly not firing, and a page needing more than the
+ceiling would be truncated.
+
 Needs `pyusb`, plus Pillow and numpy to decode the image. Scanning is done
 in-process rather than by shelling out to `scanimage`, because handing the
 device over for the duration of a scan means being blind to the Stop button and
