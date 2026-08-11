@@ -374,6 +374,12 @@ work.
 `REQUEST SENSE`, `GET_HW_STATUS`, and the vendor set `d4 d5 d6 d8 e0 e9`. The
 vendor commands only become available **after** a successful registration.
 
+Anything outside that set is answered with **status 0 and an empty payload**
+rather than an error, which is easy to mistake for success. `MODE SENSE` (0x1A)
+behaves this way, so mode pages cannot be read back over the network at all —
+and by implication a `MODE SELECT` that appears to succeed there may have done
+nothing.
+
 ## Making the panel dim
 
 **Registration is what keeps the panel lit.** Stop registering and it goes dark
@@ -405,28 +411,36 @@ false negative.
 (`GET_HW_STATUS` byte 4 & 0x80), so a poller sees it within one interval and
 can re-register before the user has finished looking at the screen.
 
-### Two things previously documented here that are wrong
+### Three things previously documented here that are wrong
 
-Recorded so nobody rebuilds them from the same bad experiments:
+All three came from the same flaw: the registering daemon was left running
+during the experiments, and registration relights the panel. Recorded with the
+measurements that refuted them, so nobody rebuilds them.
 
-* *"A sleep timer must be armed — `MODE SELECT` page 0x34 — or the panel never
-  dims."* **False.** With the timer confirmed at 0 by `MODE SENSE`, and nothing
-  registering, the panel dimmed after 777s and stayed dark. The experiments
-  that produced the original claim had the registering daemon running
-  throughout, so they could not distinguish "no timer" from "something keeps
-  relighting it".
-* *"The scanner must be polled or it never dims."* Same confound, and the
-  negative runs lasted 480s and 540s — shorter than the 777s delay actually
-  observed. Unknown, not required.
+| claim | refuted by |
+|---|---|
+| "A sleep timer must be armed (`MODE SELECT` page 0x34) or it never dims" | timer at 0, confirmed by `MODE SENSE`: dimmed at 777s polled, 776s unpolled |
+| "The scanner must be polled or it never dims" | 776s with nothing at all talking to the scanner |
+| "The dim delay is erratic, 93–771s" | 776s, 777s and 883s once registration was out of the way; the old spread was registration resetting the clock |
 
-The page 0x34 command is real and is accepted:
+Setting the timer to **thirty minutes** over the network made no difference —
+the panel dimmed at 883s, not 1800s. The page 0x34 command is real and is
+accepted:
 
 ```
 15 10 00 00 0c 00                          CDB
 00 00 00 00 34 06 NN 00 00 00 00 00        4-byte header, then the page
 ```
 
-`NN` is minutes, 0 disables. Whether it affects anything is now open.
+but it does not control this. Note what was and was not shown: setting it *over
+the network* has no effect on the dim. `MODE SENSE` is not available on that
+transport — it returns status 0 with an empty payload — so whether the write is
+silently discarded or genuinely does nothing has not been separated. That needs
+USB.
+
+The practical upshot for an implementation is that there is nothing to
+configure. To let the panel go dark, stop registering. To keep it lit, keep
+registering.
 
 ## The two transports are exclusive
 

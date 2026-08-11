@@ -70,11 +70,9 @@ DEFAULTS: dict[str, str] = {
     # button works again within a poll.
     #
     # Note this is when we STOP REGISTERING, not when the screen goes off: the
-    # scanner then takes its own time, measured between 93s and 771s.
+    # scanner then takes about thirteen more minutes (776s, 777s and 883s
+    # measured).
     "dim_after": "0",
-    # The scanner's own sleep timer, in minutes. Rarely worth changing -- any
-    # non-zero value works and the delay above barely moves.
-    "dim_timer": "1",
     # Milliseconds between button polls (network).
     "poll": "200",
     # Milliseconds between button polls over USB. Much faster, because a press

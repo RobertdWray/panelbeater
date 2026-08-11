@@ -180,7 +180,6 @@ def serve(cfg: Config, host: str, log=print) -> int:
     # Minutes of idleness before we stop registering and let the panel go dark.
     # 0 keeps it lit for ever, which is what the vendor software does.
     idle_before_dim = cfg.num("dim_after", 0.0) * 60
-    sleep_timer = max(1, int(cfg.num("dim_timer", 1)))
     if idle_before_dim:
         log(
             f"panel dims after {idle_before_dim / 60:g} min idle, "
@@ -188,19 +187,17 @@ def serve(cfg: Config, host: str, log=print) -> int:
         )
 
     def go_dark() -> None:
-        """Stop registering and let the panel sleep."""
+        """Stop registering. That alone is what lets the panel sleep."""
         dark[0] = True
         slept_once[0] = False
         log(f"[{stamp()}] idle: letting the panel go dark")
-        night.arm(host, host_id, sleep_timer, log=log)
 
     def wake(why: str) -> None:
         dark[0] = False
         last_active[0] = time.monotonic()
         log(f"[{stamp()}] {why}, waking up")
-        # Disarm the timer: while registering normally the panel is relit every
-        # interval anyway, so an armed timer only causes flicker.
-        night.arm(host, host_id, 0, log=log)
+        # Nothing to undo: going dark only stops registrations, and the loop
+        # below resumes them immediately.
 
     intent_note = [False]
     refusals = [0]
@@ -215,9 +212,10 @@ def serve(cfg: Config, host: str, log=print) -> int:
                 go_dark()
 
             if dark[0]:
-                # Do NOT register: registration is what relights the panel.
-                # Keep polling, which is required for the dim to happen at all,
-                # and watch for the sleep bit clearing -- that is a touch.
+                # Do NOT register: registration is what relights the panel,
+                # and it is the only thing that does. Keep a slow poll going so
+                # a touch is noticed -- the poll is not needed for the dim
+                # itself (measured), only to see the wake.
                 try:
                     g = hw_status(host, mac)
                     if not night.is_asleep(g) and len(g) > 4:

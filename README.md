@@ -161,8 +161,8 @@ time the screen has settled the Scan button works. Scanning, or another touch,
 starts the clock over.
 
 `dim_after` is when panelbeater stops registering, not when the screen actually
-goes off. The scanner then takes its own time — 454s, 634s and 777s across
-measured runs — so allow a good fifteen minutes before deciding it has not
+goes off. The scanner then takes about thirteen minutes of its own (776s, 777s
+and 883s measured), so allow a good fifteen minutes before deciding it has not
 worked.
 
 Why it has to work this way: **registration is what keeps the panel lit**, and
