@@ -176,7 +176,9 @@ costs a touch before the press. If you would rather it always be ready, leave
 
 Over USB the setting does nothing, because there is no registration to give up:
 an idle scanner on a USB cable dims on its own after about thirteen minutes,
-whether you want it to or not. Waking it costs a touch there too.
+whether you want it to or not — and **only a physical touch wakes it**. Arming
+and polling both leave it asleep, so after an idle spell the Scan button needs a
+tap on the screen first. On the network the daemon relights it for you.
 
 ## Scanning over USB
 

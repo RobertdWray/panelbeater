@@ -386,7 +386,16 @@ duration tracks the registration interval — a few seconds at a 15s interval,
 be done less often: the panel drops to its "not responding" screen, which is
 also lit.
 
-Over USB there is no registration, so an idle scanner dims on its own.
+Over USB there is no registration, so an idle scanner dims on its own — **and
+nothing the host can send will wake it again**. Measured: with the panel asleep,
+arming (`TEST UNIT READY`, `FIRST READ DATE`, the subject 0x02 session write and
+`MODE SELECT` page 0x2c) left the sleep bit set, and 30s of `GET_HW_STATUS`
+polling did not clear it either. Only a physical touch wakes it.
+
+For a USB-only host that means the Scan button is unavailable after roughly
+thirteen idle minutes until somebody touches the panel, and there is nothing
+the software can do about it. On the network a registration relights it
+immediately.
 
 **The delay is the scanner's own and is not consistent**: 454s, 634s and 777s
 across runs. Anything shorter than a fifteen-minute observation can report a
