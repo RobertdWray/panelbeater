@@ -138,6 +138,7 @@ def serve(cfg: Config, log=print) -> int:
             "note: dim_after is ignored over USB -- the dim behaviour has only "
             "been characterised on the network transport"
         )
+    auto = cfg.get("transport", "auto").strip().lower() not in ("usb", "network")
     poll_ms = cfg.num("poll_usb", 50.0)
     rearm = cfg.num("rearm", 300.0)
     log(f"[{stamp()}] watching for presses every {poll_ms:.0f}ms")
@@ -156,13 +157,28 @@ def serve(cfg: Config, log=print) -> int:
                 # permanently dead. Without reconnecting, the daemon stays
                 # alive but deaf: it sits here and never sees another press.
                 lost += 1
-                if lost >= 6:
-                    lost = 0
+                if lost % 6 == 0:
                     try:
                         dev = Ix1500()
                         arm(dev, user_id, log=log)
                         log(f"[{stamp()}] scanner re-attached; re-armed")
-                    except Exception:  # noqa: BLE001 -- cover shut, or busy
+                        lost = 0
+                    except ScannerAbsent:
+                        # Unplugged, or the ADF cover was closed. If the
+                        # transport was chosen automatically, the network path
+                        # may well be available now -- the cable is exactly what
+                        # was blocking it. Exit so the service restarts and
+                        # re-resolves; staying here spins silently and leaves
+                        # the panel on its error screen with nobody registering.
+                        if lost >= 60 and auto:
+                            log(
+                                f"[{stamp()}] scanner has been off USB for 30s; "
+                                "exiting so the transport is chosen again"
+                            )
+                            return 75  # EX_TEMPFAIL: systemd restarts us
+                        if lost == 6:
+                            log(f"[{stamp()}] scanner is not on USB; waiting")
+                    except Exception:  # noqa: BLE001 -- busy, or mid-reset
                         pass
                 time.sleep(0.5)
                 continue
