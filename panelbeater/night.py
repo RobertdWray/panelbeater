@@ -1,10 +1,13 @@
 # Copyright (C) 2026 Jenna Nelson
 # SPDX-License-Identifier: GPL-2.0-or-later
-"""Letting the panel go dark at night, without losing the button.
+"""Letting the panel go dark when nothing is happening.
 
-A lit scanner panel in a bedroom is a nightlight nobody asked for. Making it
-dark is harder than it sounds, because three measured facts pull against each
-other (all reproduced with a webcam pointed at the panel):
+A scanner panel that glows all night is a nightlight nobody asked for. Set
+`dim_after` and the daemon lets the panel go dark once nothing has happened
+for that many minutes; touching it brings the scanner straight back.
+
+Making it dark is harder than it sounds, because three measured facts pull
+against each other (all reproduced with a webcam pointed at the panel):
 
   * A sleep timer must be armed -- MODE SELECT page 0x34, in minutes -- or the
     panel never dims at all. With the timer at 0 it stays lit indefinitely.
@@ -18,73 +21,32 @@ other (all reproduced with a webcam pointed at the panel):
     dark, and registration expires after ~46s so it cannot simply be slowed
     down.
 
-So night mode drops the registration and keeps a slow poll. The panel falls
-back to its "not responding" screen, dims a few minutes later, and stays dim.
+So dimming means dropping the registration and keeping a slow poll. The panel
+falls back to its "not responding" screen, dims a few minutes later, and stays
+dim.
 
 The saving grace is that touching the panel wakes it immediately, and the wake
 shows up as the GET_HW_STATUS sleep bit clearing. That is visible within one
-poll, so the daemon can start registering again the moment the panel is
-touched: by the time the screen has settled, the scanner is registered and the
-button works.
+poll, so the daemon starts registering again the moment the panel is touched:
+by the time the screen has settled, the scanner is registered and the button
+works.
 
+    LIT     registering, Scan button usable
+    (idle)  nothing for `dim_after` minutes
     DARK    not registering, timer armed, slow poll     panel dark
-    (touch) sleep bit clears
-    AWAKE   registering, Scan button usable
-    (idle)  after active_minutes with nothing happening, back to DARK
+    (touch) sleep bit clears -> back to LIT
 
-Outside the configured hours none of this applies and the daemon behaves
-normally. The timer is disarmed when leaving night mode: during the day
-registration relights the panel every interval anyway, so an armed timer only
-produces flicker.
+The delay from arming to dark is the scanner's own, and it is not quick or
+consistent: measured between 93s and 771s. `dim_after` controls when we stop
+registering, not when the screen actually goes off.
+
+The timer is disarmed on waking: while registering normally the panel is
+relit every interval anyway, so an armed timer only produces flicker.
 """
 
 from __future__ import annotations
 
-import time
-
 SLEEP_BIT = 0x80  # GET_HW_STATUS byte 4
-
-
-def parse_window(spec: str) -> tuple[int, int] | None:
-    """"22:00-07:00" -> (1320, 420), in minutes past midnight.
-
-    Returns None for anything unparseable, which disables night mode rather
-    than failing: a typo in the config should not stop the scanner working.
-    """
-    spec = (spec or "").strip()
-    if not spec or "-" not in spec:
-        return None
-    a, _, b = spec.partition("-")
-
-    def mins(t: str) -> int | None:
-        t = t.strip()
-        if ":" not in t:
-            return None
-        h, _, m = t.partition(":")
-        try:
-            h, m = int(h), int(m)
-        except ValueError:
-            return None
-        if not (0 <= h < 24 and 0 <= m < 60):
-            return None
-        return h * 60 + m
-
-    start, end = mins(a), mins(b)
-    if start is None or end is None or start == end:
-        return None
-    return start, end
-
-
-def in_window(window: tuple[int, int] | None, now: time.struct_time | None = None) -> bool:
-    """Is `now` inside the window? Handles a window that crosses midnight."""
-    if not window:
-        return False
-    now = now or time.localtime()
-    minute = now.tm_hour * 60 + now.tm_min
-    start, end = window
-    if start < end:
-        return start <= minute < end
-    return minute >= start or minute < end  # wraps past midnight
 
 
 def set_sleep_timer(session, minutes: int) -> int:
@@ -99,7 +61,7 @@ def set_sleep_timer(session, minutes: int) -> int:
 
 
 def arm(host: str, host_id: str, minutes: int, log=print) -> bool:
-    """Arm or disarm the sleep timer on its own connection."""
+    """Arm or disarm the scanner's sleep timer, on its own connection."""
     from .session import Session
 
     s = Session(host, host_id)

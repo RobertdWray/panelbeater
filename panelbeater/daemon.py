@@ -160,39 +160,41 @@ def serve(cfg: Config, host: str, log=print) -> int:
     file_orphans(cfg, log=log)
 
     log(f"registering every {interval:.0f}s as host_id {host_id} ({ip})")
-    window = night.parse_window(cfg.get("quiet_hours"))
-    if window:
+    # Minutes of idleness before we stop registering and let the panel go dark.
+    # 0 keeps it lit for ever, which is what the vendor software does.
+    idle_before_dim = cfg.num("dim_after", 0.0) * 60
+    sleep_timer = max(1, int(cfg.num("dim_timer", 1)))
+    if idle_before_dim:
         log(
-            f"night mode {cfg.get('quiet_hours')}: the panel goes dark when idle, "
+            f"panel dims after {idle_before_dim / 60:g} min idle, "
             f"and wakes when touched"
         )
-    active_for = cfg.num("quiet_active_minutes", 5.0) * 60
-    dim_after = int(cfg.num("quiet_dim_minutes", 1))
 
     def go_dark() -> None:
         """Stop registering and let the panel sleep."""
         dark[0] = True
         slept_once[0] = False
-        log(f"[{stamp()}] night mode: letting the panel go dark")
-        night.arm(host, host_id, dim_after, log=log)
+        log(f"[{stamp()}] idle: letting the panel go dark")
+        night.arm(host, host_id, sleep_timer, log=log)
 
     def wake(why: str) -> None:
         dark[0] = False
         last_active[0] = time.monotonic()
-        log(f"[{stamp()}] night mode: {why}, waking up")
-        # Disarm the timer: during normal running the registration relights the
-        # panel every interval anyway, so an armed timer only causes flicker.
+        log(f"[{stamp()}] {why}, waking up")
+        # Disarm the timer: while registering normally the panel is relit every
+        # interval anyway, so an armed timer only causes flicker.
         night.arm(host, host_id, 0, log=log)
 
     intent_note = [False]
     was_pressed = False
     try:
         while True:
-            if window and night.in_window(window):
-                if not dark[0] and time.monotonic() - last_active[0] > active_for:
-                    go_dark()
-            elif dark[0]:
-                wake("night is over")
+            if (
+                idle_before_dim
+                and not dark[0]
+                and time.monotonic() - last_active[0] > idle_before_dim
+            ):
+                go_dark()
 
             if dark[0]:
                 # Do NOT register: registration is what relights the panel.

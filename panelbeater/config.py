@@ -63,15 +63,18 @@ DEFAULTS: dict[str, str] = {
     # Seconds between registrations. The panel goes dead if nobody is
     # registered, so this is also the keep-alive.
     "interval": "15",
-    # Let the panel go dark between these times, e.g. "22:00-07:00". Empty
-    # disables it. A lit panel in a bedroom is a nightlight nobody asked for.
-    # Touching the panel wakes the scanner and the Scan button works again.
-    "quiet_hours": "",
-    # How long to stay awake after a touch or a scan before going dark again.
-    "quiet_active_minutes": "5",
-    # The scanner's own sleep timer, in minutes. Any non-zero value works; the
-    # measured delay from arming to dark was 85-230s regardless.
-    "quiet_dim_minutes": "1",
+    # Minutes of idleness before the panel is allowed to go dark. 0 keeps it
+    # lit for ever, which is what the vendor software does. A lit panel in a
+    # bedroom is a nightlight nobody asked for, so set this if the scanner
+    # lives somewhere you sleep. Touching the panel wakes it and the Scan
+    # button works again within a poll.
+    #
+    # Note this is when we STOP REGISTERING, not when the screen goes off: the
+    # scanner then takes its own time, measured between 93s and 771s.
+    "dim_after": "0",
+    # The scanner's own sleep timer, in minutes. Rarely worth changing -- any
+    # non-zero value works and the delay above barely moves.
+    "dim_timer": "1",
     # Milliseconds between button polls (network).
     "poll": "200",
     # Milliseconds between button polls over USB. Much faster, because a press

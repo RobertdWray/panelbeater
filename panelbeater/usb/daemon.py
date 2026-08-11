@@ -133,9 +133,9 @@ def serve(cfg: Config, log=print) -> int:
     if not arm(dev, user_id, log=log):
         return 1
 
-    if cfg.get("quiet_hours").strip():
+    if cfg.num("dim_after", 0.0):
         log(
-            "note: quiet_hours is ignored over USB -- the dim behaviour has only "
+            "note: dim_after is ignored over USB -- the dim behaviour has only "
             "been characterised on the network transport"
         )
     poll_ms = cfg.num("poll_usb", 50.0)
