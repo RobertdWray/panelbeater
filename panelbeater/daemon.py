@@ -26,7 +26,7 @@ import threading
 import time
 from pathlib import Path
 
-from . import output
+from . import night, output
 from .config import Config
 from .protocol import (
     OP_BUTTON_NOTICE,
@@ -58,6 +58,12 @@ def serve(cfg: Config, host: str, log=print) -> int:
     reregister = threading.Event()
     busy = threading.Lock()
     last_done = [0.0]
+    # Night-mode state. Declared here because do_scan and the notice thread
+    # both close over last_active, and the thread starts before the night-mode
+    # setup further down would have created it.
+    dark = [False]
+    slept_once = [False]
+    last_active = [time.monotonic()]
 
     def do_scan(source: str, paper: bool | None = None) -> None:
         """Run one scan, from whichever path noticed the press first.
@@ -80,6 +86,7 @@ def serve(cfg: Config, host: str, log=print) -> int:
                 return
             detail = "" if paper is None else f" (paper_loaded={paper})"
             log(f"[{stamp()}] SCAN BUTTON PRESSED via {source}{detail}")
+            last_active[0] = time.monotonic()
             pages, work = capture(cfg, host, host_id, log=log)
         finally:
             last_done[0] = time.monotonic()
@@ -153,10 +160,60 @@ def serve(cfg: Config, host: str, log=print) -> int:
     file_orphans(cfg, log=log)
 
     log(f"registering every {interval:.0f}s as host_id {host_id} ({ip})")
+    window = night.parse_window(cfg.get("quiet_hours"))
+    if window:
+        log(
+            f"night mode {cfg.get('quiet_hours')}: the panel goes dark when idle, "
+            f"and wakes when touched"
+        )
+    active_for = cfg.num("quiet_active_minutes", 5.0) * 60
+    dim_after = int(cfg.num("quiet_dim_minutes", 1))
+
+    def go_dark() -> None:
+        """Stop registering and let the panel sleep."""
+        dark[0] = True
+        slept_once[0] = False
+        log(f"[{stamp()}] night mode: letting the panel go dark")
+        night.arm(host, host_id, dim_after, log=log)
+
+    def wake(why: str) -> None:
+        dark[0] = False
+        last_active[0] = time.monotonic()
+        log(f"[{stamp()}] night mode: {why}, waking up")
+        # Disarm the timer: during normal running the registration relights the
+        # panel every interval anyway, so an armed timer only causes flicker.
+        night.arm(host, host_id, 0, log=log)
+
     intent_note = [False]
     was_pressed = False
     try:
         while True:
+            if window and night.in_window(window):
+                if not dark[0] and time.monotonic() - last_active[0] > active_for:
+                    go_dark()
+            elif dark[0]:
+                wake("night is over")
+
+            if dark[0]:
+                # Do NOT register: registration is what relights the panel.
+                # Keep polling, which is required for the dim to happen at all,
+                # and watch for the sleep bit clearing -- that is a touch.
+                try:
+                    g = hw_status(host, mac)
+                    if not night.is_asleep(g) and len(g) > 4:
+                        # Only a touch counts. Straight after arming, the panel
+                        # has not fallen asleep yet, so wait for it to sleep at
+                        # least once before treating "awake" as a wake-up.
+                        if slept_once[0]:
+                            wake("panel touched")
+                            continue
+                    else:
+                        slept_once[0] = True
+                except OSError:
+                    pass
+                time.sleep(2.0)
+                continue
+
             # Register FIRST, then poll until the next one is due. Polling first
             # leaves the panel unowned for a whole interval after startup.
             intent = 0

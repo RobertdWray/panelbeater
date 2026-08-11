@@ -29,6 +29,7 @@ platform and will probably work — reports welcome.
 - Combined into one PDF, with a text layer if `ocrmypdf` is installed
 - Filed into a directory you choose, with an optional rename hook
 - Enrolment: your machine appears on the panel by name, alongside any others
+- Optional quiet hours, so the panel does not glow at you overnight
 
 ## What does not
 
@@ -113,6 +114,7 @@ blank_removal = yes
 blank_threshold = 0.5
 max_sheets = 100
 interval = 15               # seconds between registrations; this is the keep-alive
+quiet_hours =               # e.g. 22:00-07:00; let the panel go dark overnight
 ```
 
 Setting `scanner` to a fixed IP is worth doing: the iX1500 answers unicast
@@ -142,6 +144,43 @@ usually delete the original. That is why documents are assembled and named in a
 otherwise a hook that takes a minute renames a file that is no longer there.
 Keep both on the same filesystem so the handover is an atomic rename and the
 watcher never sees a partial file.
+
+## Letting the panel go dark at night
+
+A lit scanner panel in a bedroom is a nightlight nobody asked for.
+
+```ini
+[panelbeater]
+quiet_hours = 22:00-07:00
+quiet_active_minutes = 5
+```
+
+During those hours, once nothing has happened for `quiet_active_minutes`, the
+daemon stops registering and arms the scanner's sleep timer. The panel goes
+dark a couple of minutes later and stays dark. **Touch it and it wakes** — the
+daemon sees that within a poll and registers again, so by the time the screen
+has settled the Scan button works. After another idle spell it goes dark again.
+
+Why it has to work that way, all measured with a webcam pointed at the panel:
+
+* The sleep timer must be armed or the panel never dims. With the timer at 0 it
+  stays lit indefinitely.
+* The scanner must also be **polled** or it never dims, which is
+  counter-intuitive but was reproduced three times: polled it dims in 85–400s;
+  with the timer armed and no polling at all it stayed lit through 480s and
+  540s windows.
+* **Registration relights the panel**, and registration is what keeps the Scan
+  button alive. So the two cannot both be true, and night mode gives up the
+  registration until the panel is touched.
+
+Quiet hours apply to the **network** transport only. Over USB the panel is kept
+alive a different way and the dim behaviour has not been characterised, so the
+setting is ignored there.
+
+The trade-off is that while dark the scanner is unregistered, so the panel is
+showing its "not responding" screen rather than the Scan button. A touch fixes
+that in about a second, which in practice is the same gesture you were going to
+make anyway.
 
 ## Scanning over USB
 
