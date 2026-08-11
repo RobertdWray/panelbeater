@@ -1,6 +1,6 @@
 [Unit]
 Description=ScanSnap panel scanning (keeps the touch panel enabled)
-Documentation=https://github.com/CHANGEME/panelbeater
+Documentation=https://github.com/appositeit/panelbeater
 # The scanner is on the network, so do not start before it can be reached.
 After=network-online.target
 Wants=network-online.target

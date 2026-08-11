@@ -30,6 +30,10 @@ blank = ["pillow", "numpy"]
 usb = ["pyusb", "pillow", "numpy"]
 full = ["img2pdf", "pillow", "numpy", "pyusb"]
 
+[project.urls]
+Homepage = "https://github.com/appositeit/panelbeater"
+Documentation = "https://github.com/appositeit/panelbeater/blob/main/docs/PROTOCOL.md"
+
 [project.scripts]
 panelbeater = "panelbeater.cli:main"
 

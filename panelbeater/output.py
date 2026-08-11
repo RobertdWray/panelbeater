@@ -117,7 +117,11 @@ def ocr_in_place(path: Path, log: Callable[[str], None] = print) -> None:
 
 
 def run_hook(
-    hook: str, path: Path, timeout: float = 300.0, log: Callable[[str], None] = print
+    hook: str,
+    path: Path,
+    timeout: float = 300.0,
+    log: Callable[[str], None] = print,
+    env: dict[str, str] | None = None,
 ) -> Path:
     """Give the document to the hook and find out where it ended up.
 
@@ -127,6 +131,11 @@ def run_hook(
       * If it prints a path on stdout, that is taken as the new location.
       * A non-zero exit, a timeout, or a path that does not exist is ignored
         and the original is used.
+      * Every configuration setting is passed in the environment as
+        PANELBEATER_<KEY>, so a hook is configured from the same file as
+        everything else. Putting its settings in the systemd unit instead makes
+        `panelbeater scan` behave differently from the daemon, which is a
+        confusing way to find out your hook was never configured.
 
     Any failure keeps the document under its timestamp name. Naming is a bonus
     applied afterwards, never something a scan depends on.
@@ -137,7 +146,7 @@ def run_hook(
             capture_output=True,
             text=True,
             timeout=timeout,
-            env={**os.environ, "PANELBEATER_PDF": str(path)},
+            env={**os.environ, **(env or {}), "PANELBEATER_PDF": str(path)},
         )
     except (subprocess.SubprocessError, OSError) as exc:
         log(f"  hook failed: {str(exc)[:160]}")
@@ -247,7 +256,10 @@ def finish(
 
     hook = cfg.get("hook").strip()
     if hook:
-        doc = run_hook(hook, doc, cfg.num("hook_timeout", 300.0), log=log)
+        # Everything in the config reaches the hook, including keys panelbeater
+        # itself does not use -- that is how a hook gets its own settings.
+        hook_env = {f"PANELBEATER_{k.upper()}": str(v) for k, v in cfg.values.items()}
+        doc = run_hook(hook, doc, cfg.num("hook_timeout", 300.0), log=log, env=hook_env)
         # A hook owns the file while it runs, so one that deletes it can still
         # lose a scan -- but that must be reported, not raised into the daemon's
         # scan thread from inside deliver().
