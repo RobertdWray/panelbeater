@@ -24,6 +24,7 @@ iX1600/iX1400 and related models, which share the platform — untested.
 - [Scanning](#scanning)
 - [Making the panel dim](#making-the-panel-dim)
 - [Status codes](#status-codes)
+- [The two transports are exclusive](#the-two-transports-are-exclusive)
 - [The USB transport](#the-usb-transport)
 - [Notes for a SANE backend](#notes-for-a-sane-backend)
 
@@ -429,8 +430,30 @@ Returned in the opcode field of the reply, signed.
 | `0` | success |
 | `-1` | malformed request, or a command that is not allowed on this transport |
 | `-2` | refused: unregistered write, wrong intent, or a document that failed to parse |
-| `-4` | another host holds the scanner. Clears tens of seconds after it stops talking; retry |
+| `-4` | another host holds the scanner. Clears tens of seconds after it stops talking; retry. **Also returned for as long as a USB cable is attached** — see below |
 | `-7` | this host_id is not the one the scanner treats as its own — claim with intent 5 |
+
+## The two transports are exclusive
+
+A USB cable does not merely take precedence — it makes the network path
+unavailable. With a cable attached, `op 0x11` registration is refused `-4`
+indefinitely, so the panel cannot be kept alive over the network at all.
+
+Observed directly: a daemon that had been registering successfully for hours
+began refusing at the first attempt after the cable was plugged in, and every
+attempt for the following twenty minutes was refused. `GET_HW_STATUS` byte 0x10
+still read 0x80 ("free") throughout, so that byte is not a reliable indicator of
+this state. Closing the USB-side session did not release it; nor did leaving USB
+completely untouched for a minute.
+
+This is the same precedence ScanSnap Home shows: with a cable connected it uses
+USB even when the panel was configured for Wi-Fi, and a "Wi-Fi" capture made
+that way silently records a USB session.
+
+The practical consequence for an implementation is that transport is not a
+preference to be tuned, it is decided by whether a cable is plugged in. Detect
+the cable (sysfs `04c5:159f`) and use USB when it is present; a `-4` that never
+clears usually means a cable, not a busy scanner.
 
 ## The USB transport
 

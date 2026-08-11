@@ -212,7 +212,13 @@ in-process rather than by shelling out to `scanimage`, because handing the
 device over for the duration of a scan means being blind to the Stop button and
 to errors.
 
-**The catch: it is mutually exclusive with SANE.** Only one process can claim
+**A USB cable disables the network path entirely.** This is not a preference:
+with a cable attached the scanner refuses network registration (`-4`) for as
+long as it is plugged in, so `transport = auto` is usually the right setting —
+cable in, USB; cable out, network. It also means **dimming needs the cable
+out**, since that only works on the network path.
+
+**And it is mutually exclusive with SANE.** Only one process can claim
 the USB interface, so while panelbeater is running `scanimage` fails at open
 with "Invalid argument", and while a SANE scan is in progress panelbeater
 cannot poll the button. If you need both, use `transport = network` and leave

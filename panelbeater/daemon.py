@@ -47,6 +47,23 @@ def stamp() -> str:
     return time.strftime("%H:%M:%S")
 
 
+def usb_cable_present() -> bool:
+    """Is the scanner attached by USB? Read from sysfs, so it costs nothing and
+    does not disturb whoever holds the device."""
+    from pathlib import Path as _P
+
+    for f in _P("/sys/bus/usb/devices").glob("*/idProduct"):
+        try:
+            if (
+                f.read_text().strip() == "159f"
+                and (f.parent / "idVendor").read_text().strip() == "04c5"
+            ):
+                return True
+        except OSError:
+            continue
+    return False
+
+
 def serve(cfg: Config, host: str, log=print) -> int:
     host_id = cfg.host_id
     hid = bytes.fromhex(host_id)
@@ -186,6 +203,7 @@ def serve(cfg: Config, host: str, log=print) -> int:
         night.arm(host, host_id, 0, log=log)
 
     intent_note = [False]
+    refusals = [0]
     was_pressed = False
     try:
         while True:
@@ -241,9 +259,21 @@ def serve(cfg: Config, host: str, log=print) -> int:
                         intent_note[0] = True
                         log(f"[{stamp()}] claimed the scanner for this host")
                 if status == 0:
-                    pass  # quiet: this happens every interval
+                    refusals[0] = 0  # quiet: this happens every interval
                 elif status is not None:
                     log(f"[{stamp()}] registration refused (status {status})")
+                    refusals[0] += 1
+                    # -4 means another host holds the scanner. The commonest
+                    # cause by far is a USB cable: the scanner gives USB
+                    # precedence whenever one is connected and refuses network
+                    # registration outright, which otherwise just looks like a
+                    # network fault that never clears.
+                    if status == -4 and refusals[0] == 3 and usb_cable_present():
+                        log(
+                            "    the scanner is connected by USB, and it refuses "
+                            "network registration while a cable is attached.\n"
+                            "    Unplug it, or set transport = usb."
+                        )
                 else:
                     log(f"[{stamp()}] no reply to registration")
             except OSError as exc:
