@@ -6,39 +6,38 @@ A scanner panel that glows all night is a nightlight nobody asked for. Set
 `dim_after` and the daemon lets the panel go dark once nothing has happened
 for that many minutes; touching it brings the scanner straight back.
 
-Making it dark is harder than it sounds, because three measured facts pull
-against each other (all reproduced with a webcam pointed at the panel):
+What actually keeps the panel lit is **registration**. Stop registering and it
+goes dark on its own; keep registering and it cannot. Everything else that was
+once believed about this turned out to be an artefact of how it was measured:
 
-  * A sleep timer must be armed -- MODE SELECT page 0x34, in minutes -- or the
-    panel never dims at all. With the timer at 0 it stays lit indefinitely.
-  * The scanner must also be POLLED for the dim to happen. Counter-intuitive,
-    but reproduced three times: polled, it dims (85s at a 200ms poll, 402s at
-    5s); with the timer armed and no polling at all it stayed lit through 480s
-    and 540s windows.
-  * Registration RELIGHTS the panel, and registration is what keeps the Scan
-    button alive. Measured: dim at 84.5s, a registration 30s later, relit 2s
-    after that. So while the daemon registers normally the panel cannot stay
-    dark, and registration expires after ~46s so it cannot simply be slowed
-    down.
+  * "A sleep timer must be armed (MODE SELECT page 0x34) or it never dims."
+    **Wrong.** Measured with the timer confirmed at 0 by MODE SENSE, and
+    nothing registering, the panel dimmed after 777s and stayed dark. The
+    original experiments that concluded otherwise ran the registering daemon
+    throughout, so they could not separate "no timer" from "something keeps
+    relighting it".
+  * "It never dims unless the scanner is polled." Same confound, and the
+    negative runs were 480s and 540s -- shorter than the 777s delay actually
+    observed. Unverified either way; treat it as unknown.
+  * "Registration relights the panel." This one holds up: dark at 84.5s, a
+    registration 30s later, relit 2s after that, reproduced repeatedly.
 
-So dimming means dropping the registration and keeping a slow poll. The panel
-falls back to its "not responding" screen, dims a few minutes later, and stays
-dim.
+The timer is still armed when going dark, because that configuration is the one
+verified end to end twice, and disarmed on waking so it cannot cause flicker
+while registering. It is plausibly unnecessary. It is cheap, and removing it
+would need another measurement rather than another assumption.
 
-The saving grace is that touching the panel wakes it immediately, and the wake
-shows up as the GET_HW_STATUS sleep bit clearing. That is visible within one
-poll, so the daemon starts registering again the moment the panel is touched:
-by the time the screen has settled, the scanner is registered and the button
-works.
+The delay from dropping the registration to a dark screen is the scanner's own
+and is neither quick nor consistent: 454s, 634s and 777s across runs. Any test
+shorter than about fifteen minutes can report a false negative -- several of
+ours did, and that is how the two wrong conclusions above survived.
 
     LIT     registering, Scan button usable
     (idle)  nothing for `dim_after` minutes
     DARK    not registering, timer armed, slow poll     panel dark
     (touch) sleep bit clears -> back to LIT
 
-The delay from arming to dark is the scanner's own, and it is not quick or
-consistent: measured between 93s and 771s. `dim_after` controls when we stop
-registering, not when the screen actually goes off.
+`dim_after` controls when we stop registering, not when the screen goes off.
 
 The timer is disarmed on waking: while registering normally the panel is
 relit every interval anyway, so an armed timer only produces flicker.

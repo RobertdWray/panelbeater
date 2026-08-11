@@ -135,8 +135,8 @@ def serve(cfg: Config, log=print) -> int:
 
     if cfg.num("dim_after", 0.0):
         log(
-            "note: dim_after is ignored over USB -- the dim behaviour has only "
-            "been characterised on the network transport"
+            "note: dim_after does nothing over USB -- with no registration to "
+            "keep it lit, the panel dims by itself when idle (~13 min observed)"
         )
     auto = cfg.get("transport", "auto").strip().lower() not in ("usb", "network")
     poll_ms = cfg.num("poll_usb", 50.0)

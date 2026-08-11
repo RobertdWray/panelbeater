@@ -161,29 +161,22 @@ time the screen has settled the Scan button works. Scanning, or another touch,
 starts the clock over.
 
 `dim_after` is when panelbeater stops registering, not when the screen actually
-goes off. The scanner then takes its own time, measured anywhere between 93 and
-771 seconds.
+goes off. The scanner then takes its own time — 454s, 634s and 777s across
+measured runs — so allow a good fifteen minutes before deciding it has not
+worked.
 
-Why it has to work this way, all measured with a webcam pointed at the panel:
-
-* The sleep timer must be armed or the panel never dims. With the timer at 0 it
-  stays lit indefinitely.
-* The scanner must also be **polled** or it never dims, which is
-  counter-intuitive but was reproduced three times: polled it dims in 85–400s;
-  with the timer armed and no polling at all it stayed lit through 480s and
-  540s windows.
-* **Registration relights the panel**, and registration is what keeps the Scan
-  button alive. So the two cannot both be true, and dimming gives up the
-  registration until the panel is touched.
+Why it has to work this way: **registration is what keeps the panel lit**, and
+registration is also what keeps the Scan button alive. The two cannot both be
+true, so dimming gives up the registration until the panel is touched.
 
 The trade-off is that while dark the scanner is unregistered, so the panel
 shows its "not responding" screen rather than the Scan button, and waking it
 costs a touch before the press. If you would rather it always be ready, leave
 `dim_after` at 0.
 
-This applies to the **network** transport only. Over USB the panel is kept
-alive a different way and the dim behaviour has not been characterised, so the
-setting is ignored there.
+Over USB the setting does nothing, because there is no registration to give up:
+an idle scanner on a USB cable dims on its own after about thirteen minutes,
+whether you want it to or not. Waking it costs a touch there too.
 
 ## Scanning over USB
 
