@@ -22,6 +22,7 @@ iX1600/iX1400 and related models, which share the platform — untested.
 - [Enrolment](#enrolment)
 - [Detecting a button press](#detecting-a-button-press)
 - [Scanning](#scanning)
+- [Making the panel dim](#making-the-panel-dim)
 - [Status codes](#status-codes)
 - [The USB transport](#the-usb-transport)
 - [Notes for a SANE backend](#notes-for-a-sane-backend)
@@ -371,6 +372,53 @@ work.
 `op 0x01` tunnels a CDB, but only a few are accepted: `INQUIRY`,
 `REQUEST SENSE`, `GET_HW_STATUS`, and the vendor set `d4 d5 d6 d8 e0 e9`. The
 vendor commands only become available **after** a successful registration.
+
+## Making the panel dim
+
+Not obvious, and three facts fight each other. All were measured with a webcam
+pointed at the panel rather than inferred, because the scanner reports nothing
+useful about its own backlight.
+
+**The sleep timer.** `MODE SELECT` page 0x34, byte 2 = minutes:
+
+```
+15 10 00 00 0c 00        CDB
+00 00 00 00 34 06 NN 00 00 00 00 00     4-byte header, then the page
+```
+
+With `NN` = 0 the panel never dims, however long it is left. Any non-zero value
+works and the value barely affects the delay.
+
+**The scanner must also be polled.** Counter-intuitive, and the reason a first
+attempt looks like the timer does not work. Reproduced three times:
+
+| condition | result |
+|---|---|
+| timer armed, `GET_HW_STATUS` every 200ms | dark after 85s |
+| timer armed, `GET_HW_STATUS` every 5s | dark after 402s |
+| timer armed, no polling at all | still lit at 480s and 540s |
+
+**Registration relights it.** Measured directly: dark at 84.5s, a registration
+30s later, relit 2s after that. Dim duration tracks the registration interval —
+a few seconds at a 15s interval, 30.4s at 120s. Registration also expires after
+about 46s, so it cannot simply be done less often: the panel drops to its "not
+responding" screen, which is also lit.
+
+So a host that wants a dark panel has to **stop registering** and keep polling.
+The panel falls back to the "not responding" screen, dims, and stays dim —
+observed continuously beyond 500s.
+
+**Waking.** Touching the panel wakes it immediately and clears the sleep bit
+(`GET_HW_STATUS` byte 4 & 0x80), so a poller sees it within one interval and
+can re-register before the user has finished looking at the screen.
+
+**The delay is neither quick nor consistent**: 93s to 771s across runs with the
+same settings. Any test shorter than about 13 minutes can produce a false
+negative — three of ours did.
+
+This has only been characterised on the network transport. The page 0x34
+command is ordinary SCSI and works over USB too, but whether the USB keep-alive
+relights the panel the way registration does has not been established.
 
 ## Status codes
 
