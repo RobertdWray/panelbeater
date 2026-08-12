@@ -382,65 +382,72 @@ nothing.
 
 ## Making the panel dim
 
-**Registration is what keeps the panel lit.** Stop registering and it goes dark
-by itself; keep registering and it cannot stay dark. That is the whole
-mechanism, and it is the only part that has survived measurement.
+Two things decide it, and they are independent:
 
-Measured: dark at 84.5s, a registration 30s later, relit 2s after that. Dim
-duration tracks the registration interval — a few seconds at a 15s interval,
-30.4s at 120s. Registration also expires after about 46s, so it cannot simply
-be done less often: the panel drops to its "not responding" screen, which is
-also lit.
+1. **The scanner's sleep timer**, `MODE SELECT` mode page 0x34, in minutes. It
+   is what actually turns the backlight off.
+2. **Registration counts as activity and resets it.** A host that keeps
+   registering keeps the panel lit for ever, whatever the timer says. Measured:
+   dark at 84.5s, a registration 30s later, relit 2s after that.
 
-Over USB there is no registration, so an idle scanner dims on its own — **and
-nothing the host can send will wake it again**. Measured: with the panel asleep,
-arming (`TEST UNIT READY`, `FIRST READ DATE`, the subject 0x02 session write and
-`MODE SELECT` page 0x2c) left the sleep bit set, and 30s of `GET_HW_STATUS`
-polling did not clear it either. Only a physical touch wakes it.
+So to let the panel go dark, stop registering and wait out the timer. To keep
+it lit, keep registering. Polling does **not** count as activity and does not
+prevent the dim — measured at 776s with nothing at all talking to the scanner,
+against 777s for an otherwise identical polled run.
 
-For a USB-only host that means the Scan button is unavailable after roughly
-thirteen idle minutes until somebody touches the panel, and there is nothing
-the software can do about it. On the network a registration relights it
-immediately.
-
-**The delay is the scanner's own and is not consistent**: 454s, 634s and 777s
-across runs. Anything shorter than a fifteen-minute observation can report a
-false negative.
-
-**Waking.** Touching the panel wakes it immediately and clears the sleep bit
-(`GET_HW_STATUS` byte 4 & 0x80), so a poller sees it within one interval and
-can re-register before the user has finished looking at the screen.
-
-### Three things previously documented here that are wrong
-
-All three came from the same flaw: the registering daemon was left running
-during the experiments, and registration relights the panel. Recorded with the
-measurements that refuted them, so nobody rebuilds them.
-
-| claim | refuted by |
-|---|---|
-| "A sleep timer must be armed (`MODE SELECT` page 0x34) or it never dims" | timer at 0, confirmed by `MODE SENSE`: dimmed at 777s polled, 776s unpolled |
-| "The scanner must be polled or it never dims" | 776s with nothing at all talking to the scanner |
-| "The dim delay is erratic, 93–771s" | 776s, 777s and 883s once registration was out of the way; the old spread was registration resetting the clock |
-
-Setting the timer to **thirty minutes** over the network made no difference —
-the panel dimmed at 883s, not 1800s. The page 0x34 command is real and is
-accepted:
+### The sleep timer
 
 ```
-15 10 00 00 0c 00                          CDB
+15 10 00 00 0c 00                          MODE SELECT(6)
 00 00 00 00 34 06 NN 00 00 00 00 00        4-byte header, then the page
 ```
 
-but it does not control this. Note what was and was not shown: setting it *over
-the network* has no effect on the dim. `MODE SENSE` is not available on that
-transport — it returns status 0 with an empty payload — so whether the write is
-silently discarded or genuinely does nothing has not been separated. That needs
-USB.
+Read it back with `MODE SENSE(6)`, `1a 00 34 00 14 00`. **The page begins at
+offset 12 of the reply, not offset 4** — there is an 8-byte block descriptor in
+between, and reading the value from offset 6 gets a byte of that descriptor,
+which is always zero. That misreading cost two wrong conclusions here:
 
-The practical upshot for an implementation is that there is nothing to
-configure. To let the panel go dark, stop registering. To keep it lit, keep
-registering.
+```
+13 00 00 08 | 00 00 00 00 00 00 00 01 | 34 06 0f 00 00 00 00 00
+header      | block descriptor        | page code, length, VALUE
+```
+
+Values are clamped, silently, and the write always reports success:
+
+| written | stored |
+|---|---|
+| 0 | 0 — accepted; presumably "never", not verified |
+| 1 | **2** — 2 minutes is the minimum |
+| 2, 3, 15, 30, 60 | as written |
+| 255 | **224** — the maximum |
+
+Always read the value back rather than trusting the status.
+
+**Page 0x34 works over USB only.** Over the network the write is accepted with
+status 0 and has no effect: a timer set to 30 that way left the panel dimming
+on its old value. `MODE SENSE` is not carried on that transport either — it too
+returns status 0 with an empty payload — so there is no way to notice from the
+network side. See the allowlist note under Scanning.
+
+### Verified behaviour
+
+| timer | conditions | dark after |
+|---|---|---|
+| default (~15) | polled, nothing registering | 777s |
+| default (~15) | nothing touching the scanner at all | 776s |
+| 30, set over the network | nothing touching the scanner | 883s — the write was ignored |
+| 2, verified over USB | nothing touching the scanner | ~2 min |
+
+The delay is the timer, not a property of the device. An earlier version of
+this document described it as an erratic 93–771s; that was registration
+resetting the clock at different points, plus the timer sitting at values
+nobody had read correctly.
+
+**Waking.** Touching the panel wakes it and clears the sleep bit
+(`GET_HW_STATUS` byte 4 & 0x80), so a poller sees it within one interval. On
+the network a registration relights it immediately. Over USB **nothing the host
+can send wakes it** — arming and polling both leave the sleep bit set — so
+after the timer expires the Scan button needs a physical touch.
 
 ## The two transports are exclusive
 

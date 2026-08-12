@@ -73,6 +73,14 @@ DEFAULTS: dict[str, str] = {
     # scanner then takes about thirteen more minutes (776s, 777s and 883s
     # measured).
     "dim_after": "0",
+    # The scanner's own sleep timer, in minutes: how long after the last
+    # activity the backlight goes off. 0 leaves it alone. Minimum 2, maximum
+    # 224, clamped silently by the scanner.
+    #
+    # USB ONLY. On the network the write is accepted and ignored, so this is
+    # applied when panelbeater is running over USB and skipped otherwise. Out
+    # of the box the scanner uses about 15 minutes.
+    "dim_timer": "0",
     # Milliseconds between button polls (network).
     "poll": "200",
     # Milliseconds between button polls over USB. Much faster, because a press

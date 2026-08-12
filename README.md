@@ -121,7 +121,8 @@ blank_removal = yes
 blank_threshold = 0.5
 max_sheets = 100
 interval = 15               # seconds between registrations; this is the keep-alive
-dim_after = 0               # minutes idle before the panel goes dark; 0 = never
+dim_after = 0               # minutes idle before we stop registering; 0 = never
+dim_timer = 0               # scanner's own sleep timer, minutes; USB only
 ```
 
 Setting `scanner` to a fixed IP is worth doing: the iX1500 answers unicast
@@ -154,38 +155,36 @@ watcher never sees a partial file.
 
 ## Letting the panel go dark
 
-A scanner panel that glows all night is a nightlight nobody asked for.
+A scanner panel that glows all night is a nightlight nobody asked for. Two
+things decide whether it is lit, and you may need both:
 
 ```ini
 [panelbeater]
-dim_after = 10      # minutes of idleness; 0 (the default) keeps it lit
+dim_after = 10      # minutes idle before we stop registering; 0 = never
+dim_timer = 0       # the scanner's own sleep timer, in minutes; USB only
 ```
 
-After that long with nothing happening, the daemon stops registering and arms
-the scanner's sleep timer. The panel goes dark and stays dark. **Touch it and
-it wakes** — the daemon sees that within a poll and registers again, so by the
-time the screen has settled the Scan button works. Scanning, or another touch,
-starts the clock over.
+**Registration keeps the panel lit.** While panelbeater is registering, the
+scanner never sleeps — that is also what keeps the Scan button alive, so the
+two cannot both be had. `dim_after` is how long to wait before giving up the
+registration.
 
-`dim_after` is when panelbeater stops registering, not when the screen actually
-goes off. The scanner then takes about thirteen minutes of its own (776s, 777s
-and 883s measured), so allow a good fifteen minutes before deciding it has not
-worked.
+**The scanner's own timer then decides when the backlight goes off**, about 15
+minutes out of the box. So with `dim_after = 10` the panel goes dark roughly 25
+minutes after you last touch it. Touch it and it comes straight back: the
+daemon sees the wake within a poll and registers again.
 
-Why it has to work this way: **registration is what keeps the panel lit**, and
-registration is also what keeps the Scan button alive. The two cannot both be
-true, so dimming gives up the registration until the panel is touched.
+To make it darker sooner, shorten the scanner's timer with `dim_timer` — but
+**that only works over USB.** On the network the write is accepted and silently
+ignored. Plug the cable in once with `dim_timer = 2`, let panelbeater set it,
+and the setting sticks in the scanner afterwards.
 
-The trade-off is that while dark the scanner is unregistered, so the panel
-shows its "not responding" screen rather than the Scan button, and waking it
-costs a touch before the press. If you would rather it always be ready, leave
-`dim_after` at 0.
+Values are clamped by the scanner: 2 minutes is the minimum, 224 the maximum,
+and `dim_timer = 0` leaves whatever is there alone.
 
-Over USB the setting does nothing, because there is no registration to give up:
-an idle scanner on a USB cable dims on its own after about thirteen minutes,
-whether you want it to or not — and **only a physical touch wakes it**. Arming
-and polling both leave it asleep, so after an idle spell the Scan button needs a
-tap on the screen first. On the network the daemon relights it for you.
+Over USB nothing registers, so the panel simply follows its own timer, and
+**only a physical touch wakes it** — arming and polling both leave it asleep.
+After an idle spell the Scan button needs a tap on the screen first.
 
 ## Scanning over USB
 

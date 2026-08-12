@@ -2,50 +2,45 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 """Letting the panel go dark when nothing is happening.
 
-A scanner panel that glows all night is a nightlight nobody asked for. Set
-`dim_after` and the daemon stops registering once nothing has happened for that
-many minutes; the panel then goes dark on its own. Touching it clears the sleep
-bit, the daemon sees that within a poll and registers again, and the Scan button
-works by the time the screen has settled.
+Two independent things decide whether the panel is lit:
+
+  * **The scanner's own sleep timer** (MODE SELECT page 0x34, in minutes) is
+    what turns the backlight off.
+  * **Registration resets it.** A host that keeps registering keeps the panel
+    lit for ever, whatever the timer says -- dark at 84.5s, a registration 30s
+    later, relit 2s after that.
+
+So `dim_after` stops the daemon registering after that many idle minutes, and
+the panel then goes dark once the scanner's timer expires. Touching it clears
+the sleep bit, the daemon notices within a poll and registers again, and the
+Scan button works by the time the screen has settled.
 
     LIT     registering, Scan button usable
     (idle)  nothing for `dim_after` minutes
-    DARK    not registering                              panel dark
+    DARK    not registering; scanner's timer expires   panel dark
     (touch) sleep bit clears -> back to LIT
 
-**Registration is the whole mechanism.** Stop registering and the panel dims
-after about thirteen minutes; keep registering and it cannot dim, because each
-registration relights it (dark at 84.5s, a registration 30s later, relit 2s
-after that). `dim_after` therefore controls when we stop registering, not when
-the screen goes off.
+Total delay is therefore `dim_after` plus the scanner's timer, which is around
+15 minutes out of the box.
 
-This file used to arm a sleep timer and keep a slow poll going. Both were
-removed after being measured, because each rested on an experiment that could
-not have shown what it claimed. Recorded so nobody adds them back:
+**The timer can only be set over USB.** On the network the write is accepted
+with status 0 and does nothing, and MODE SENSE is not carried there either, so
+nothing reveals it. See `usb.set_sleep_timer`.
 
-  * *"A sleep timer must be armed (MODE SELECT page 0x34) or it never dims."*
-    False. With the timer at 0, confirmed by MODE SENSE over USB, the panel
-    dimmed at 777s (polled) and 776s (unpolled). Setting the timer to THIRTY
-    MINUTES over the network changed nothing: it dimmed at 883s, not 1800s.
-  * *"The scanner must be polled or it never dims."* False. 776s with nothing
-    whatsoever talking to the scanner.
+Two mistakes were made here and both are worth remembering, because each
+produced a confident wrong answer that lasted:
 
-Both original claims came from runs with the registering daemon left up, which
-relights the panel, so they could not distinguish "no timer" or "no polling"
-from "something keeps waking it". Their negative windows were 480s and 540s --
-shorter than the delay actually observed.
+  * *"Polling is required for the dim."* False -- 776s with nothing at all
+    talking to the scanner, against 777s polled. This one is settled.
+  * *"The sleep timer does nothing."* Also false, and it was my correction of
+    the first mistake. It came from reading the timer at the wrong offset: the
+    MODE SENSE reply has an 8-byte block descriptor, so the page starts at byte
+    12, and byte 6 is descriptor padding that is always zero. Every "timer
+    confirmed at 0" was reading that padding. With the value read correctly, a
+    2-minute timer dims the panel in 2 minutes.
 
-The delay is closer to fixed than the old notes suggest: 776s, 777s and 883s.
-The 93-771s spread once recorded was registration resetting the clock at
-different points, not the scanner being erratic.
-
-One caveat for anyone revisiting page 0x34: what was shown is that setting it
-*over the network* does not affect the dim. MODE SENSE is unavailable on that
-transport -- status 0 and an empty payload -- so whether the write is silently
-dropped or genuinely does nothing was not separated. That needs the USB cable.
-
-Over USB there is no registration at all, so an idle scanner dims by itself and
-nothing the host can send wakes it again -- only a touch.
+The lesson both times was the same: an experiment that cannot distinguish two
+explanations will happily produce one of them.
 """
 
 from __future__ import annotations

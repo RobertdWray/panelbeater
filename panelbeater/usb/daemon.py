@@ -69,6 +69,42 @@ def user_id_from_scanner(panel: Panel, log=print) -> str:
     return ""
 
 
+MODE_PAGE_SLEEP = 0x34
+
+
+def read_sleep_timer(dev: Ix1500) -> int | None:
+    """Minutes of idleness before the panel sleeps, or None if unreadable.
+
+    The page starts at offset 12 of the MODE SENSE reply -- there is an 8-byte
+    block descriptor first. Reading from offset 4 lands in that descriptor,
+    which is always zero, and looks exactly like a disabled timer.
+    """
+    try:
+        d, _ = dev.command(bytes([0x1A, 0x00, MODE_PAGE_SLEEP, 0x00, 0x14, 0x00]), 0x14)
+    except Exception:  # noqa: BLE001
+        return None
+    return d[14] if len(d) > 14 else None
+
+
+def set_sleep_timer(dev: Ix1500, minutes: int, log=print) -> int | None:
+    """Set the timer and return what the scanner actually stored.
+
+    Values are clamped silently and the write always reports success: 1 becomes
+    2 (the minimum), 255 becomes 224 (the maximum). So the write is verified by
+    reading it back rather than trusting the status.
+    """
+    out = bytes(4) + bytes([MODE_PAGE_SLEEP, 0x06, minutes & 0xFF, 0, 0, 0, 0, 0])
+    try:
+        dev.command(bytes([0x15, 0x10, 0, 0, len(out), 0]), 0, out)
+    except Exception as exc:  # noqa: BLE001
+        log(f"  could not set the sleep timer: {exc}")
+        return None
+    got = read_sleep_timer(dev)
+    if got is not None and got != minutes:
+        log(f"  sleep timer: asked for {minutes} min, scanner stored {got}")
+    return got
+
+
 def arm(dev: Ix1500, user_id: str, log=print) -> bool:
     """Put the panel into the state where the Scan button works."""
     try:
@@ -133,10 +169,20 @@ def serve(cfg: Config, log=print) -> int:
     if not arm(dev, user_id, log=log):
         return 1
 
+    # dim_after is a network idea -- it stops registering, and there is no
+    # registration here. Over USB the panel dims purely on the scanner's own
+    # timer, which unlike the network transport CAN be set from this side.
+    want = int(cfg.num("dim_timer", 0))
+    current = read_sleep_timer(dev)
+    if want:
+        got = set_sleep_timer(dev, want, log=log)
+        log(f"[{stamp()}] panel sleep timer set to {got} min")
+    elif current is not None:
+        log(f"[{stamp()}] panel sleeps after {current} min idle (dim_timer to change)")
     if cfg.num("dim_after", 0.0):
         log(
-            "note: dim_after does nothing over USB -- with no registration to "
-            "keep it lit, the panel dims by itself when idle (~13 min observed)"
+            "note: dim_after has no effect over USB -- nothing registers here, so "
+            "the panel follows its own sleep timer. Use dim_timer instead."
         )
     auto = cfg.get("transport", "auto").strip().lower() not in ("usb", "network")
     poll_ms = cfg.num("poll_usb", 50.0)
