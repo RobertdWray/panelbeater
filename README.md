@@ -41,6 +41,13 @@ platform and will probably work — reports welcome.
 - **Which host the panel points at is chosen on the panel.** A host can add
   itself to the list but cannot select itself; those writes are accepted and
   ignored by the scanner.
+- **A USB cable disables the network path.** Not a preference: with a cable
+  attached the scanner refuses network registration outright, so plugging one
+  in switches you to USB whether you meant to or not — and takes idle dimming
+  with it, since that only exists on the network path.
+- **Over USB the panel dims by itself after ~13 minutes and only a touch wakes
+  it.** There is no registration to relight it, and nothing the host can send
+  will. After an idle spell the Scan button needs a tap on the screen first.
 - **USB and SANE cannot both have the scanner.** Only one process can claim the
   interface. See [Scanning over USB](#scanning-over-usb).
 
