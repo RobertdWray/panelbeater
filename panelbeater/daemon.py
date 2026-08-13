@@ -79,7 +79,12 @@ def serve(cfg: Config, host: str, log=print) -> int:
     # both close over last_active, and the thread starts before the night-mode
     # setup further down would have created it.
     dark = [False]
-    slept_once = [False]
+    dark_since = [0.0]
+    # Only give up a registration we actually hold. Going dark because the
+    # scanner is unreachable is meaningless, and it used to happen: the daemon
+    # logged "cannot reach scanner" for ten minutes, decided that counted as
+    # idle, and went dark against a scanner that was switched off.
+    registered = [False]
     last_active = [time.monotonic()]
 
     def do_scan(source: str, paper: bool | None = None) -> None:
@@ -189,7 +194,7 @@ def serve(cfg: Config, host: str, log=print) -> int:
     def go_dark() -> None:
         """Stop registering. That alone is what lets the panel sleep."""
         dark[0] = True
-        slept_once[0] = False
+        dark_since[0] = time.monotonic()
         log(f"[{stamp()}] idle: letting the panel go dark")
 
     def wake(why: str) -> None:
@@ -207,6 +212,7 @@ def serve(cfg: Config, host: str, log=print) -> int:
             if (
                 idle_before_dim
                 and not dark[0]
+                and registered[0]
                 and time.monotonic() - last_active[0] > idle_before_dim
             ):
                 go_dark()
@@ -216,17 +222,36 @@ def serve(cfg: Config, host: str, log=print) -> int:
                 # and it is the only thing that does. Keep a slow poll going so
                 # a touch is noticed -- the poll is not needed for the dim
                 # itself (measured), only to see the wake.
+                #
+                # A boot notice has to be honoured HERE too. Without this the
+                # loop below never runs while dark, so a scanner that reboots
+                # comes up with nobody registered and the daemon never notices:
+                # a press then hangs the panel on "Scanning..." for as long as
+                # it takes somebody to restart the service. Observed lasting 25
+                # hours.
+                if reregister.is_set():
+                    reregister.clear()
+                    wake("scanner rebooted")
+                    continue
                 try:
                     g = hw_status(host, mac)
-                    if not night.is_asleep(g) and len(g) > 4:
-                        # Only a touch counts. Straight after arming, the panel
-                        # has not fallen asleep yet, so wait for it to sleep at
-                        # least once before treating "awake" as a wake-up.
-                        if slept_once[0]:
-                            wake("panel touched")
-                            continue
-                    else:
-                        slept_once[0] = True
+                    # An awake panel means somebody touched it. The grace
+                    # period is because the panel is still lit for a while
+                    # after we stop registering, and waking at once would just
+                    # bounce.
+                    #
+                    # This used to wait for a poll to REPORT the panel asleep
+                    # before any wake was allowed, which deadlocks: if the
+                    # scanner is unreachable when we go dark, every poll raises
+                    # and that flag is never set, so the wake can never fire
+                    # even after the scanner comes back.
+                    if (
+                        len(g) > 4
+                        and not night.is_asleep(g)
+                        and time.monotonic() - dark_since[0] > 120
+                    ):
+                        wake("panel touched")
+                        continue
                 except OSError:
                     pass
                 time.sleep(2.0)
@@ -258,6 +283,7 @@ def serve(cfg: Config, host: str, log=print) -> int:
                         log(f"[{stamp()}] claimed the scanner for this host")
                 if status == 0:
                     refusals[0] = 0  # quiet: this happens every interval
+                    registered[0] = True
                 elif status is not None:
                     log(f"[{stamp()}] registration refused (status {status})")
                     refusals[0] += 1
@@ -275,6 +301,7 @@ def serve(cfg: Config, host: str, log=print) -> int:
                 else:
                     log(f"[{stamp()}] no reply to registration")
             except OSError as exc:
+                registered[0] = False
                 log(f"[{stamp()}] cannot reach scanner: {exc}")
 
             # Poll for the button between registrations. Once a network host is
