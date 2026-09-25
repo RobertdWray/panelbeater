@@ -11,10 +11,12 @@ threshold that scan_batch() treats as "a usable image".
 
 from __future__ import annotations
 
+import io
 import random
 from pathlib import Path
 
 import pytest
+from PIL import Image
 
 from panelbeater.usb import daemon
 from panelbeater.usb.scanner import (
@@ -38,6 +40,9 @@ FEED = (0x31, 0x01)
 # first poll of that side.
 Good = "good"
 Tiny = "tiny"
+# "void" streams pixels, then keeps answering READ with 0x00 and never EOM, the
+# way the unit this was measured on behaves once the paper has passed.
+Void = "void"
 
 
 def sense_bytes(key: int = 0, asc: int = 0, ascq: int = 0, eom: bool = False) -> bytes:
@@ -97,20 +102,24 @@ class FakeDev:
         plan = self.current[window] if self.current else Good
         if isinstance(plan, int):
             return sense_bytes(0x03, 0x80, plan)
-        if window in self.delivered:
+        if window in self.delivered and plan != Void:
             return sense_bytes(eom=True)  # side finished; next READ is empty
         return sense_bytes()
 
     def _read(self, window: int) -> bytes:
-        if window in self.delivered:
-            return b""
-        self.delivered.add(window)
         plan = self.current[window]
         rows = 300
         stride = self.width_px * 3
+        if window in self.delivered:
+            # After the paper: nothing at all, or (Void) an endless 0x00 stream.
+            return bytes(stride * 20) if plan == Void else b""
+        self.delivered.add(window)
         if plan == Tiny:
             return bytes([FILLER, FILLER])
         return random.Random(window).randbytes(stride * rows)
+
+    def reads(self, window: int) -> int:
+        return sum(1 for c in self.cdbs if c[0] == READ and c[5] == window)
 
     # -- assertions ------------------------------------------------------------
     def count(self, op: int, sub: int | None = None) -> int:
@@ -313,3 +322,34 @@ def test_daemon_files_the_pages_on_success(monkeypatch, tmp_path):
     ]
     assert not work_dirs[0].exists()
     assert any("2 side(s) scanned" in line for line in logs)
+
+
+# -- end of page on a unit that streams 0x00, and the page's physical size -------
+
+
+def test_zero_void_ends_the_side_without_eom_and_is_trimmed(tmp_path):
+    scanner, dev, prefix = make_scanner([duplex(Void, Void)], tmp_path)
+
+    assert scanner.scan_batch(prefix) == 2
+    # One READ of pixels, one READ of void, then the side is done: no third
+    # READ, no ceiling, no timeout.
+    assert dev.reads(WINDOW_FRONT) == 2 and dev.reads(WINDOW_BACK) == 2
+    im = Image.open(tmp_path / "page-0001.jpg")
+    assert im.size == (2612, 300), "the 20 void rows must be trimmed"
+
+
+def test_jpeg_carries_the_scan_resolution(tmp_path):
+    scanner, _, prefix = make_scanner([duplex()], tmp_path)
+    scanner.scan_batch(prefix)
+    assert Image.open(tmp_path / "page-0001.jpg").info["dpi"] == (300, 300)
+
+
+def test_to_jpeg_trims_trailing_constant_rows_of_any_value():
+    scanner = UsbScanner(FakeDev([], width_px=2612), resolution=300, mode="color")
+    scanner.width_px = 2612
+    stride = 2612 * 3
+    paper = random.Random(1).randbytes(stride * 40)
+    for void in (bytes([FILLER]) * (stride * 30), bytes(stride * 30)):
+        jpeg = scanner.to_jpeg(paper + void)
+        assert jpeg is not None
+        assert Image.open(io.BytesIO(jpeg)).size == (2612, 40)

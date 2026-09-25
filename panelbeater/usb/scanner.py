@@ -53,6 +53,10 @@ WINDOW_BACK = 0x80
 CHUNK = 0xFFEE  # what ScanSnap Home asks for per READ
 WINDOW_WIDTH_1200 = 10448  # scan width in 1/1200 inch, from SET WINDOW
 FILLER = 0x55  # what the scanner streams once the sheet has passed
+# ...on the unit this was written against. Another iX1500 streams 0x00 instead
+# (measured: every byte after the paper was 0x00 for 1,800 rows, while paper,
+# even blank paper, carries sensor noise). A page ends on either.
+VOID_BYTES = (FILLER, 0x00)
 SIDE_NAMES = {WINDOW_FRONT: "front", WINDOW_BACK: "back"}
 
 # ASCQ values the scanner reports with sense key 0x03 / ASC 0x80. Hopper empty
@@ -255,12 +259,14 @@ class UsbScanner:
                 if data:
                     buf[w] += data
                     # The scanner keeps answering reads after the sheet has
-                    # passed, streaming 0x55 filler. EOM alone proved unreliable
-                    # -- it never fired and a side ran to 1.1GB -- so a chunk
-                    # that is essentially all filler ends the page. Not exactly
-                    # all: demanding 100% missed it on a real scan and read the
-                    # full 42MB ceiling instead, so allow a few stray bytes.
-                    if len(data) > 4096 and data.count(FILLER) >= len(data) * 0.95:
+                    # passed, streaming filler. EOM alone proved unreliable --
+                    # it never fired and a side ran to 1.1GB -- so a chunk that
+                    # is essentially all filler ends the page. Not exactly all:
+                    # demanding 100% missed it on a real scan and read the full
+                    # 42MB ceiling instead, so allow a few stray bytes.
+                    if len(data) > 4096 and any(
+                        data.count(v) >= len(data) * 0.95 for v in VOID_BYTES
+                    ):
                         done[w] = True
                 if eom or not data:
                     done[w] = True
@@ -282,8 +288,14 @@ class UsbScanner:
 
         * The data is INVERTED -- white paper arrives near 0, so a straight
           render is a photographic negative.
-        * The tail is 0x55 filler. The scanner keeps answering reads long after
+        * The tail is filler. The scanner keeps answering reads long after
           the sheet has passed, so the trailing constant rows are trimmed.
+          Constant of ANY value: 0x55 on one unit, 0x00 on another, while a
+          row of paper -- even blank paper -- always carries sensor noise.
+
+        The JPEG is stamped with the scan resolution so whatever assembles the
+        PDF (img2pdf reads the JFIF density) gets the physical page size right.
+        Without it a 2612-pixel-wide side was filed as a 27-inch-wide page.
         """
         ch = CHANNELS[self.mode]
         stride = self.width_px * ch
@@ -294,9 +306,7 @@ class UsbScanner:
             rows, self.width_px, ch
         )
         flat = arr.reshape(rows, -1)
-        is_filler = (flat.std(axis=1) < 0.5) & (
-            np.abs(flat.mean(axis=1) - FILLER) < 1.0
-        )
+        is_filler = flat.std(axis=1) < 0.5
         last = rows
         for i in range(rows - 1, -1, -1):
             if not is_filler[i]:
@@ -307,7 +317,7 @@ class UsbScanner:
         img = 255 - arr[:last]
         out = io.BytesIO()
         Image.fromarray(img.squeeze() if ch == 1 else img).save(
-            out, "JPEG", quality=quality
+            out, "JPEG", quality=quality, dpi=(self.resolution, self.resolution)
         )
         return out.getvalue()
 

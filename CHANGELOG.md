@@ -11,6 +11,12 @@
   the paper is still in the hopper for a rescan.
 - **`panelbeater scan` over USB exits 1 when nothing was scanned**, matching
   the network path.
+- **USB: pages end where the paper ends, at the right size.** The unit this
+  was measured on streams 0x00 after the paper, not 0x55, so every side read
+  to the 42 MB ceiling and was filed 17.8 in tall. A chunk that is nearly all
+  0x00 now ends the side too, trailing constant rows of any value are trimmed,
+  and the JPEG carries the scan resolution so img2pdf makes an 8.7 in wide
+  page instead of a 27 in one.
 - First tests: `tests/test_usb_scan_batch.py` drives the real `read_sheet()`
   and `scan_batch()` against a scripted fake of the USB transport.
 
