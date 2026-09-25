@@ -9,3 +9,4 @@ dist/
 captures/
 *.pcap
 *.pcapng
+.venv/

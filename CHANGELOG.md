@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- **USB: a fault no longer files a partial stack.** A paper jam, open cover,
+  double feed, failed read or timeout before the hopper empties now raises
+  `BatchAborted` from `scan_batch()` instead of returning the sides captured
+  so far, which the daemon then filed as a finished document. The commands
+  sent to the scanner are unchanged; the sheet's "scan complete" still goes
+  out so the panel does not stick on "Scanning…". Nothing is published, and
+  the paper is still in the hopper for a rescan.
+- First tests: `tests/test_usb_scan_batch.py` drives the real `read_sheet()`
+  and `scan_batch()` against a scripted fake of the USB transport.
+
 ## 0.1.0 — first release
 
 Panel-button scanning for the ScanSnap iX1500 on Linux, over Wi-Fi or USB,

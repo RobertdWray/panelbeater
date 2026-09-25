@@ -53,6 +53,27 @@ WINDOW_BACK = 0x80
 CHUNK = 0xFFEE  # what ScanSnap Home asks for per READ
 WINDOW_WIDTH_1200 = 10448  # scan width in 1/1200 inch, from SET WINDOW
 FILLER = 0x55  # what the scanner streams once the sheet has passed
+SIDE_NAMES = {WINDOW_FRONT: "front", WINDOW_BACK: "back"}
+
+# ASCQ values the scanner reports with sense key 0x03 / ASC 0x80. Hopper empty
+# is the normal end of a batch; everything else stops the batch early.
+ASCQ_HOPPER_EMPTY = 0x03
+FAULT_NAMES = {0x01: "paper jam", 0x02: "cover open", 0x07: "double feed"}
+
+
+def fault_name(ascq: int) -> str:
+    return FAULT_NAMES.get(ascq, f"ascq {ascq:#x}")
+
+
+class BatchAborted(RuntimeError):
+    """The scanner stopped before the hopper was empty.
+
+    A jam on sheet 4 of 10 used to return the six sides already captured, and
+    they were filed as a finished document indistinguishable from a clean
+    scan. Raising instead lets the caller discard the batch; the paper is still
+    in the hopper, and a rescan is the only honest recovery.
+    """
+
 
 # The hand-typed MODE SELECT pages, gamma tables and SET WINDOW descriptor that
 # used to live here have been removed on purpose. Every one of them was
@@ -75,6 +96,12 @@ class UsbScanner:
         self.duplex = duplex
         self.width_px = 0
         self.last_fault = None
+        # Why the last read_sheet() did not end cleanly, or None. scan_batch()
+        # turns it into BatchAborted after the sheet's "scan complete" is sent.
+        self.sheet_fault: str | None = None
+        # How long read_sheet() waits for a sheet before giving up. An attribute
+        # rather than a constant so tests can shorten it without patching time.
+        self.read_timeout_s = 120.0
         self.feed_settle = 0.8
 
     # -- helpers ----------------------------------------------------------
@@ -188,6 +215,10 @@ class UsbScanner:
         End of a side is REQUEST SENSE reporting EOM with key 0 -- not a medium
         error. While scanning it answers key 0x3 / asc 0x80 / ascq 0x13, which
         means "not ready yet", so that is a wait, not a fault.
+
+        A fault, a failed READ or a timeout does not raise here: the caller
+        still has to send the sheet's "scan complete", or the panel sticks on
+        "Scanning...". It is recorded in sheet_fault and the caller raises.
         """
         windows = [WINDOW_FRONT, WINDOW_BACK] if self.duplex else [WINDOW_FRONT]
         chunk = {WINDOW_FRONT: 0xFFEE, WINDOW_BACK: 0x010000}
@@ -195,6 +226,7 @@ class UsbScanner:
         done = {w: False for w in windows}
         cap = self.max_bytes()
         deadline = time.monotonic() + timeout_s
+        self.sheet_fault = None
 
         while time.monotonic() < deadline and not all(done.values()):
             for w in windows:
@@ -208,6 +240,7 @@ class UsbScanner:
                     if ascq == 0x13:
                         continue  # still scanning; give the other window a turn
                     self.last_fault = ascq
+                    self.sheet_fault = f"{fault_name(ascq)} on the {SIDE_NAMES[w]}"
                     done[w] = True
                     continue
                 try:
@@ -215,7 +248,8 @@ class UsbScanner:
                         [0x28, 0, 0, 0, 0, w,
                          (n >> 16) & 0xFF, (n >> 8) & 0xFF, n & 0xFF, 0], n
                     )  # fmt: skip
-                except Exception:  # noqa: BLE001
+                except Exception as exc:  # noqa: BLE001
+                    self.sheet_fault = f"read failed on the {SIDE_NAMES[w]}: {exc}"
                     done[w] = True
                     continue
                 if data:
@@ -236,6 +270,9 @@ class UsbScanner:
                     print(f"    window {w:#04x}: hit the {cap:,}B ceiling, stopping",
                           flush=True)  # fmt: skip
                     done[w] = True
+        if not all(done.values()):
+            waiting = ", ".join(SIDE_NAMES[w] for w in windows if not done[w])
+            self.sheet_fault = f"timed out after {timeout_s:.0f}s waiting for the {waiting}"
         return {w: bytes(b) for w, b in buf.items()}
 
     def to_jpeg(self, raw: bytes, quality: int = 90) -> bytes | None:
@@ -280,18 +317,25 @@ class UsbScanner:
         self._cmd([0x15, 0x10, 0, 0, len(out), 0], 0, out)
 
     def scan_batch(self, out_prefix: str, max_sheets: int = 100) -> int:
-        """Scan until the feeder empties. Returns the number of sides written."""
+        """Scan until the feeder empties. Returns the number of sides written.
+
+        Raises BatchAborted on any fault before the hopper empties -- a jam,
+        an open cover, a double feed, a failed read, a timeout, or a sheet that
+        fed but yielded no image -- so a partial stack is never mistaken for a
+        finished one. The commands sent to the scanner are the same either
+        way; only what happens to the captured sides differs.
+        """
         self.setup()
         pages = 0
         try:
             for sheet in range(1, max_sheets + 1):
                 fault = self.start_sheet()
-                if fault is not None:
-                    reason = {0x03: "hopper empty", 0x01: "paper jam",
-                              0x02: "cover open", 0x07: "double feed"}.get(fault, f"ascq {fault:#x}")  # fmt: skip
-                    print(f"  sheet {sheet}: {reason}")
+                if fault == ASCQ_HOPPER_EMPTY:
+                    print(f"  sheet {sheet}: hopper empty")
                     break
-                sides = self.read_sheet()
+                if fault is not None:
+                    raise BatchAborted(f"sheet {sheet}: {fault_name(fault)}")
+                sides = self.read_sheet(self.read_timeout_s)
                 got = 0
                 for w, tag in ((WINDOW_FRONT, "front"), (WINDOW_BACK, "back")):
                     raw = sides.get(w, b"")
@@ -308,9 +352,13 @@ class UsbScanner:
                         print(
                             f"  sheet {sheet} {tag:<5} {len(raw)}B raw, no usable image"
                         )
-                self._cmd([0xF1, 0x09, 0, 0, 0, 0, 0, 0, 0, 0])  # scan complete
+                # Scan complete -- sent even for a faulted sheet, so the panel
+                # is not left on "Scanning...".
+                self._cmd([0xF1, 0x09, 0, 0, 0, 0, 0, 0, 0, 0])
+                if self.sheet_fault:
+                    raise BatchAborted(f"sheet {sheet}: {self.sheet_fault}")
                 if not got:
-                    break
+                    raise BatchAborted(f"sheet {sheet}: fed but produced no usable image")
         finally:
             self.finish()
         return pages
