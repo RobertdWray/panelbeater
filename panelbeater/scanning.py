@@ -262,6 +262,18 @@ def scan_batch(
 
         time.sleep(SETUP_SETTLE_S)
 
+        # e9 leaves a check condition behind (key 5 / ASC 0x26, "invalid field
+        # in parameter list") and the scanner carries on regardless. Sense is
+        # one-shot, so read it here or it surfaces on the first feed and looks
+        # like a fault. Logged, not hidden.
+        _, sense = s.scsi(bytes([0x03, 0, 0, 0, 0x12, 0]), 0x12)
+        d = decode_sense(sense)
+        if d and d[0] != 0:
+            log(
+                f"  setup left sense key {d[0]:#x} asc {d[1]:#04x} "
+                f"ascq {d[2]:#04x}; cleared"
+            )
+
         stopped = f"reached the {max_sheets}-sheet limit"
         for sheet in range(1, max_sheets + 1):
             # e0 starts THIS sheet, not the batch. The USB capture reissues the

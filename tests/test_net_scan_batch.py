@@ -56,9 +56,19 @@ class FakeSession:
     mac = b"\x00" * 6
 
     def __init__(
-        self, sheets, e0_status=None, e0_sense=None, setup_status=None, sense=None
+        self,
+        sheets,
+        e0_status=None,
+        e0_sense=None,
+        setup_status=None,
+        sense=None,
+        setup_sense=None,
     ):
         self.sheets = list(sheets)
+        # cdb[0] of a setup command -> the sense it leaves behind, one-shot.
+        # The real unit's e9 leaves key 5 / ASC 0x26 ("invalid field in
+        # parameter list") and carries on regardless.
+        self.setup_sense = dict(setup_sense or {})
         self.e0_status = dict(e0_status or {})  # sheet number -> status
         self.e0_sense = dict(e0_sense or {})  # sheet number -> sense after its e0
         self.setup_status = dict(setup_status or {})  # cdb[0] -> status
@@ -71,13 +81,17 @@ class FakeSession:
     def scsi(self, cdb, read_len=0, out=b"", collect=False, quiet=6.0):
         self.cdbs.append(bytes(cdb))
         op = cdb[0]
+        if op in self.setup_sense:
+            self.pending_sense = self.setup_sense[op]
         if op in self.setup_status:
             return self.setup_status[op], b""
         if op == E0:
             if self.sheets:
                 self.sheet += 1
                 self.current = self.sheets.pop(0)
-                self.pending_sense = self.e0_sense.get(self.sheet, sense_bytes())
+                # A pending sense survives the feed, like the real unit's.
+                if self.pending_sense == sense_bytes():
+                    self.pending_sense = self.e0_sense.get(self.sheet, sense_bytes())
                 return self.e0_status.get(self.sheet, 0), b""
             # No paper: the real unit still answers 0 (after ~0.9 s instead of
             # 0.05 s) and the next REQUEST SENSE reports hopper empty, once.
@@ -145,6 +159,21 @@ def test_clean_two_sheet_batch_files_four_sides_and_terminates_once(tmp_path, ho
     assert pages_on_disk(tmp_path) == [f"page-000{i}.jpg" for i in range(1, 5)]
     assert s.count(E0) == 4  # two sheets, the feed that found the hopper empty, e0 end
     assert s.count(D6) == 1
+
+
+E9 = 0xE9
+
+
+def test_a_stale_sense_left_by_setup_is_drained_and_logged_not_treated_as_a_fault(
+    tmp_path, hopper
+):
+    """e9 leaves key 5 / ASC 0x26 behind; before the drain it surfaced on the
+    first feed as "sense key 0x5 asc 0x26 ascq 0x00 on feed" and aborted every
+    batch."""
+    logged: list[str] = []
+    s = hopper(FakeSession([duplex()], setup_sense={E9: sense_bytes(0x05, 0x26, 0x00)}))
+    assert scan_batch(s, str(tmp_path / "page"), 100, log=logged.append) == 2
+    assert any("setup left sense key 0x5 asc 0x26" in m for m in logged)
 
 
 def test_later_sheets_are_fed_without_consulting_the_hopper_sensor(tmp_path, hopper):
