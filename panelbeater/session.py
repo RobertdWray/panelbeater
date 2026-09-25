@@ -9,6 +9,7 @@ import socket
 import struct
 import time
 
+from .profiles import user_id_from_profiles
 from .protocol import (
     INTENT_CLAIM,
     OP_PROF_INFO,
@@ -157,12 +158,9 @@ class Session:
 
         Read from the profiles rather than hard-coded: it is per-scanner, and an
         earlier version shipped one particular scanner's value to everybody.
+        A host profile's user, not the cloud profile's: see profiles.py.
         """
-        for p in self.profiles():
-            uid = p.get("user_id")
-            if uid:
-                return str(uid)
-        return ""
+        return user_id_from_profiles(self.profiles())
 
     def open_session(self, user_id: str = "", port: int = 0) -> int:
         """Tell the scanner which user the panel is acting for."""
@@ -258,5 +256,11 @@ class Session:
                 if collect and status is not None and not buf and not data:
                     break
         except socket.timeout:
-            pass
+            # Nothing for `quiet` seconds. An image read ends at its EOI and a
+            # plain command ends at its status, so silence is a fault, not a
+            # slow scanner: returning what arrived so far as status 0 let a
+            # stalled side be filed as a page.
+            raise OSError(
+                f"scanner stopped answering for {quiet:g}s during CDB {cdb[0]:#04x}"
+            ) from None
         return signed(status if status is not None else 0), data

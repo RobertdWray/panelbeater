@@ -33,6 +33,7 @@ from pathlib import Path
 
 from .. import output
 from ..config import Config
+from ..profiles import user_id_from_profiles
 from .panel import Panel
 from .scanner import UsbScanner
 from .transport import Ix1500, ScannerAbsent, ScannerBusy
@@ -64,26 +65,6 @@ def user_id_from_scanner(panel: Panel, log=print) -> str:
     except json.JSONDecodeError:
         return ""
     return user_id_from_profiles(doc.get("profiles", []))
-
-
-def user_id_from_profiles(profiles: list[dict]) -> str:
-    """Pick the user to act as: a host profile's, not the cloud profile's.
-
-    A scanner that was set up with ScanSnap Home lists "Send to ScanSnap
-    Cloud" first, under its own user_id. Acting as that user makes every scan
-    a cloud job: the scanner then tries to reach ScanSnap Cloud, cannot, and
-    the panel shows an orange "!" -- "The device is not responding" -- after
-    each batch. The profiles ScanSnap Home creates for a computer carry
-    prof_type 0 and a host_address; the cloud profile carries prof_type 1 and
-    none. Prefer the former, fall back to whatever has a user_id.
-    """
-    for p in profiles:
-        if p.get("user_id") and p.get("prof_type") == 0:
-            return str(p["user_id"])
-    for p in profiles:
-        if p.get("user_id"):
-            return str(p["user_id"])
-    return ""
 
 
 MODE_PAGE_SLEEP = 0x34

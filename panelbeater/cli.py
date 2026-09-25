@@ -13,6 +13,7 @@ from pathlib import Path
 from . import output
 from .config import Config, config_paths, derive_host_id
 from .enrol import enrol
+from .errors import BatchAborted
 from .protocol import discover, hw_status, local_ip_and_mac
 from .scanning import scan_to_dir
 from .session import Session
@@ -136,14 +137,20 @@ def cmd_scan(args, cfg: Config) -> int:
     host = resolve_scanner(cfg, args.scanner)
     work = Path(tempfile.mkdtemp(prefix="panelbeater-"))
     try:
-        n = scan_to_dir(
-            host,
-            cfg.host_id,
-            str(work / "page"),
-            prof_id=args.prof_id or cfg.get("prof_id"),
-            max_sheets=args.max_sheets or int(cfg.num("max_sheets", 100)),
-            skip_register=args.skip_register,
-        )
+        try:
+            n = scan_to_dir(
+                host,
+                cfg.host_id,
+                str(work / "page"),
+                prof_id=args.prof_id or cfg.get("prof_id"),
+                max_sheets=args.max_sheets or int(cfg.num("max_sheets", 100)),
+                skip_register=args.skip_register,
+                user_id=cfg.get("user_id"),
+            )
+        except BatchAborted as exc:
+            # Nothing is filed; the paper is still in the hopper.
+            print(f"scan failed: {exc}", file=sys.stderr)
+            return 1
         if not n:
             return 1
         print(f"{n} side(s) scanned")

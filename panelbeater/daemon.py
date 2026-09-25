@@ -28,6 +28,7 @@ from pathlib import Path
 
 from . import night, output
 from .config import Config
+from .errors import BatchAborted
 from .protocol import (
     OP_BUTTON_NOTICE,
     PORT_BUTTON_NOTIFY,
@@ -361,9 +362,12 @@ def capture(
             prof_id=cfg.get("prof_id"),
             max_sheets=int(cfg.num("max_sheets", 100)),
             skip_register=True,  # the daemon already holds the registration
+            user_id=cfg.get("user_id"),
             log=log,
         )
-    except OSError as exc:
+    except (OSError, BatchAborted) as exc:
+        # Nothing is filed. The work directory goes back to the caller so it
+        # can be removed; the paper is still in the hopper for a rescan.
         log(f"  scan failed: {exc}")
         return [], work
     if not n:

@@ -41,6 +41,7 @@ import time
 import numpy as np
 from PIL import Image
 
+from ..errors import BatchAborted
 from .sequence import SETUP_SEQUENCE
 
 # Field values for the SET WINDOW descriptor and the image decoder.
@@ -71,16 +72,6 @@ STATUS_BYTE = 9
 
 def fault_name(ascq: int) -> str:
     return FAULT_NAMES.get(ascq, f"ascq {ascq:#x}")
-
-
-class BatchAborted(RuntimeError):
-    """The scanner stopped before the hopper was empty.
-
-    A jam on sheet 4 of 10 used to return the six sides already captured, and
-    they were filed as a finished document indistinguishable from a clean
-    scan. Raising instead lets the caller discard the batch; the paper is still
-    in the hopper, and a rescan is the only honest recovery.
-    """
 
 
 # The hand-typed MODE SELECT pages, gamma tables and SET WINDOW descriptor that

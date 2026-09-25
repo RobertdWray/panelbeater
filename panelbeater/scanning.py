@@ -11,6 +11,8 @@ from __future__ import annotations
 import time
 from typing import Callable
 
+from .errors import BatchAborted
+from .profiles import default_profile
 from .protocol import hw_status
 from .session import Session
 
@@ -25,13 +27,33 @@ D4_PARAMS = bytes.fromhex(
 assert len(D4_PARAMS) == 80, "d4 parameter block must be exactly 80 bytes"
 
 
+JPEG_SOI = b"\xff\xd8\xff"
+JPEG_EOI = b"\xff\xd9"
+
+# A side smaller than this is not a page. The scanner's own JPEG of a blank
+# sheet at 300 dpi is well over 100 kB; a stray frame is a few bytes.
+MIN_IMAGE_BYTES = 10_000
+
+# Seconds between the setup commands and the first e0. A module constant so a
+# test can zero it.
+SETUP_SETTLE_S = 2.0
+
+
 def as_jpeg(raw: bytes) -> bytes | None:
-    """Image data arrives with a couple of leading bytes before the SOI."""
-    i = raw.find(b"\xff\xd8\xff")
+    """The complete JPEG in an image read, or None.
+
+    Image data arrives with a couple of leading bytes before the SOI. A read is
+    complete at its EOI: Session.scsi() stops collecting there, so data without
+    one means the side was cut off (a closed socket, a scanner that gave up).
+    Returning the fragment used to let a truncated side be filed as a page.
+    """
+    i = raw.find(JPEG_SOI)
     if i < 0:
         return None
-    j = raw.rfind(b"\xff\xd9")
-    return raw[i : j + 2] if j > i else raw[i:]
+    j = raw.rfind(JPEG_EOI)
+    if j < i:
+        return None
+    return raw[i : j + 2]
 
 
 def decode_sense(b: bytes) -> tuple[int, int, int, bool, bool] | None:
@@ -45,14 +67,15 @@ def decode_sense(b: bytes) -> tuple[int, int, int, bool, bool] | None:
     return (b[2] & 0x0F, b[0x0C], b[0x0D], bool(b[2] & 0x40), bool(b[2] & 0x20))
 
 
-# (key, asc, ascq) -> (why the batch stopped, was it a clean finish).
-BATCH_END = {
-    (0x03, 0x80, 0x03): ("hopper empty", True),
-    (0x03, 0x80, 0x01): ("paper jam", False),
-    (0x03, 0x80, 0x02): ("cover open", False),
-    (0x03, 0x80, 0x04): ("unusual paper", False),
-    (0x03, 0x80, 0x07): ("double feed", False),
-    (0x03, 0x80, 0x08): ("no paper picked", False),
+# (key, asc, ascq) -> what the scanner is reporting. Hopper empty is the one
+# condition that can end a batch cleanly; everything else aborts it.
+SENSE_HOPPER_EMPTY = (0x03, 0x80, 0x03)
+SENSE_FAULTS = {
+    (0x03, 0x80, 0x01): "paper jam",
+    (0x03, 0x80, 0x02): "cover open",
+    (0x03, 0x80, 0x04): "unusual paper",
+    (0x03, 0x80, 0x07): "double feed",
+    (0x03, 0x80, 0x08): "no paper picked",
 }
 
 
@@ -61,12 +84,110 @@ def hopper_has_paper(host: str, mac: bytes) -> bool:
 
     Asked on a SEPARATE connection. The scan connection has to carry the
     d5/d8/e9/d4 sequence and nothing in front of it, or d4 fails with -1.
+
+    Raises OSError when the answer is unknown. A failed or short reply used to
+    read as "empty", which ended the batch cleanly and filed what had been
+    captured so far -- a Wi-Fi blip between sheets became a short document.
     """
-    try:
-        g = hw_status(host, mac)
-    except OSError:
-        return False
-    return len(g) > 4 and not (g[3] & 0x80)
+    g = hw_status(host, mac)
+    if len(g) < 5:
+        raise OSError(f"GET_HW_STATUS reply too short ({len(g)} bytes)")
+    return not (g[3] & 0x80)
+
+
+SETUP = [
+    ("d5 (01)", [0xD5, 0, 0, 0x01, 0x08, 0x08], 8, bytes(8)),
+    ("d8 begin", [0xD8, 0, 0, 0, 0, 0], 0, b""),
+    ("e9 config", [0xE9, 0, 0, 0, 0, 0, 0, 0x20, 0, 0], 0, b""),
+    ("d4 params", [0xD4, 0, 0, 0, 0x50, 0], 0, D4_PARAMS),
+    ("d5 (00)", [0xD5, 0, 0, 0x00, 0x08, 0x08], 8, bytes(8)),
+]
+# The e0 here starts a page with no paper behind it, which is how the scanner
+# is told the batch is over; d6 then closes it.
+TERMINATORS = [
+    ("e0 end", [0xE0, 0, 0, 0, 0, 0]),
+    ("d6 finish", [0xD6, 0, 0, 0, 0, 0]),
+]
+# Both sides of every sheet. The D4 block above is a duplex capture, so a sheet
+# that yields only a front is a fault, not a one-sided page; if the block ever
+# becomes adjustable this list has to follow it.
+SIDES = ((0x00, "front", 0), (0x80, "back", 1))
+
+
+def read_sheet(
+    s: Session,
+    sheet: int,
+    out_prefix: str,
+    first_page: int,
+    log: Callable[[str], None],
+) -> int:
+    """Read both sides of one fed sheet. Returns the number of sides written.
+
+    0 means the scanner reported the hopper empty before anything was read:
+    the sheet was never fed, and the batch can end cleanly. Any other shortfall
+    raises BatchAborted -- a sense fault, a failed READ, a missing side, or an
+    image without its EOI -- because the caller cannot tell a partial sheet
+    from a whole one after the fact.
+    """
+    written = 0
+    for side, tag, last in SIDES:
+        st, raw = s.scsi(
+            bytes([0x28, 0, 0, 0x02, 0, side, 0x30, 0, 0, 0, last, 0]),
+            0x300000,
+            collect=True,
+            quiet=20,
+        )
+        _, sense = s.scsi(bytes([0x03, 0, 0, 0, 0x12, 0]), 0x12)
+        d = decode_sense(sense)
+        if d:
+            key, asc, ascq, eom, ili = d
+            # The hopper-empty sense that sane-backends documents never
+            # actually arrives on this transport -- the key stays 0 through the
+            # last sheet. The hopper check between sheets is what ends the
+            # batch; this is here to catch real faults: jam, cover open, double
+            # feed, and anything not on the list.
+            log(
+                f"  sheet {sheet} {tag:<6} sense key={key:#x} "
+                f"asc={asc:#04x} ascq={ascq:#04x} "
+                f"eom={int(eom)} ili={int(ili)}"
+            )
+            if (key, asc, ascq) == SENSE_HOPPER_EMPTY:
+                if written:
+                    raise BatchAborted(
+                        f"sheet {sheet}: hopper empty reported after the front was read"
+                    )
+                return 0
+            fault = SENSE_FAULTS.get((key, asc, ascq))
+            if fault:
+                raise BatchAborted(f"sheet {sheet}: {fault} on the {tag}")
+            if key != 0:
+                raise BatchAborted(
+                    f"sheet {sheet}: sense key {key:#x} asc {asc:#04x} "
+                    f"ascq {ascq:#04x} on the {tag}"
+                )
+        if st != 0:
+            raise BatchAborted(f"sheet {sheet}: READ failed on the {tag} (status {st})")
+        if JPEG_SOI not in raw:
+            raise BatchAborted(f"sheet {sheet}: no image for the {tag}")
+        jpg = as_jpeg(raw)
+        if jpg is None:
+            raise BatchAborted(
+                f"sheet {sheet}: incomplete image for the {tag} (no EOI)"
+            )
+        if len(jpg) < MIN_IMAGE_BYTES:
+            raise BatchAborted(
+                f"sheet {sheet}: image for the {tag} is too small ({len(jpg)} bytes)"
+            )
+        # Sides are numbered sequentially rather than named, so a plain
+        # lexicographic glob puts them in page order. "-back" sorts before
+        # "-front", which silently reversed every sheet.
+        path = f"{out_prefix}-{first_page + written + 1:04d}.jpg"
+        with open(path, "wb") as fh:
+            fh.write(jpg)
+        written += 1
+        log(f"  sheet {sheet} {tag:<6} {len(jpg):>9,} bytes -> {path}")
+        s.scsi(bytes([0x28, 0, 0x80, 0, 0, side, 0, 0, 0x20, 0, 0, 0]), 0x20)
+    return written
 
 
 def scan_batch(
@@ -79,30 +200,24 @@ def scan_batch(
 
     The caller must already have registered, opened a session, selected a
     profile and called connect().
+
+    Only a complete batch returns: every fed sheet read on both sides, each
+    image ending in its EOI, and the batch ended by the hopper running empty
+    or by max_sheets. Anything else raises BatchAborted, so the caller files
+    nothing and the paper is still in the hopper for a rescan. The terminators
+    go out either way.
     """
-    setup = [
-        ("d5 (01)", [0xD5, 0, 0, 0x01, 0x08, 0x08], 8, bytes(8)),
-        ("d8 begin", [0xD8, 0, 0, 0, 0, 0], 0, b""),
-        ("e9 config", [0xE9, 0, 0, 0, 0, 0, 0, 0x20, 0, 0], 0, b""),
-        ("d4 params", [0xD4, 0, 0, 0, 0x50, 0], 0, D4_PARAMS),
-        ("d5 (00)", [0xD5, 0, 0, 0x00, 0x08, 0x08], 8, bytes(8)),
-    ]
-    for label, cdb, rl, out in setup:
-        st, _ = s.scsi(bytes(cdb), rl, out)
-        log(f"  {label:<10} {st}")
-        if st != 0:
-            log(f"  aborting: {label} failed")
-            return 0
-
-    time.sleep(2)
-
-    # Sides are numbered sequentially rather than named, so a plain
-    # lexicographic glob puts them in page order. "-back" sorts before
-    # "-front", which silently reversed every sheet.
     pages = 0
-    stopped = f"reached the {max_sheets}-sheet limit"
-    done = False
     try:
+        for label, cdb, rl, out in SETUP:
+            st, _ = s.scsi(bytes(cdb), rl, out)
+            log(f"  {label:<10} {st}")
+            if st != 0:
+                raise BatchAborted(f"setup: {label} refused (status {st})")
+
+        time.sleep(SETUP_SETTLE_S)
+
+        stopped = f"reached the {max_sheets}-sheet limit"
         for sheet in range(1, max_sheets + 1):
             # e0 starts THIS sheet, not the batch. The USB capture reissues the
             # equivalent (SET_WINDOW + OBJ_POS + SCAN) for every page. Sending
@@ -111,61 +226,24 @@ def scan_batch(
             st, _ = s.scsi(bytes([0xE0, 0, 0, 0, 0, 0]))
             log(f"  sheet {sheet} e0 START {st}")
             if st != 0:
-                stopped = f"e0 refused for sheet {sheet} (status {st})"
-                break
+                raise BatchAborted(f"sheet {sheet}: e0 refused (status {st})")
 
-            got = 0
-            for side, tag, last in ((0x00, "front", 0), (0x80, "back", 1)):
-                _st, raw = s.scsi(
-                    bytes([0x28, 0, 0, 0x02, 0, side, 0x30, 0, 0, 0, last, 0]),
-                    0x300000,
-                    collect=True,
-                    quiet=20,
-                )
-                jpg = as_jpeg(raw)
-                if jpg and len(jpg) > 10000:
-                    pages += 1
-                    path = f"{out_prefix}-{pages:04d}.jpg"
-                    with open(path, "wb") as fh:
-                        fh.write(jpg)
-                    log(f"  sheet {sheet} {tag:<6} {len(jpg):>9,} bytes -> {path}")
-                    got += 1
-                else:
-                    log(f"  sheet {sheet} {tag:<6} no image ({len(raw)} bytes)")
-
-                _, sense = s.scsi(bytes([0x03, 0, 0, 0, 0x12, 0]), 0x12)
-                d = decode_sense(sense)
-                if d:
-                    key, asc, ascq, eom, ili = d
-                    # The sense expected to end a batch (key 0x3 / asc 0x80 /
-                    # ascq 0x03, "hopper empty") never actually arrives on this
-                    # transport -- the key stays 0 through the last sheet. The
-                    # hopper check below is what ends the batch. This stays to
-                    # catch real faults: jam, cover open, double feed.
-                    log(
-                        f"  sheet {sheet} {tag:<6} sense key={key:#x} "
-                        f"asc={asc:#04x} ascq={ascq:#04x} "
-                        f"eom={int(eom)} ili={int(ili)}"
-                    )
-                    end = BATCH_END.get((key, asc, ascq))
-                    if end:
-                        stopped, done = end[0], True
-                    elif key != 0:
-                        stopped = f"sense key {key:#x} asc {asc:#04x} ascq {ascq:#04x}"
-                        done = True
-                    if done:
-                        log(f"  sheet {sheet} {tag:<6} -> {stopped}")
-                        break
-                s.scsi(bytes([0x28, 0, 0x80, 0, 0, side, 0, 0, 0x20, 0, 0, 0]), 0x20)
-
-            if done:
+            written = read_sheet(s, sheet, out_prefix, pages, log)
+            if not written:
+                stopped = "hopper empty"
                 break
-            if not got:
-                stopped = "no image data"
-                break
+            pages += written
+
             # Decided BEFORE reading the next sheet, never after: a speculative
-            # empty read is what wedges the panel.
-            if not hopper_has_paper(s.host, s.mac):
+            # empty read is what wedges the panel. An unreadable answer is not
+            # "empty" -- the sheets so far would be filed as the whole document.
+            try:
+                more = hopper_has_paper(s.host, s.mac)
+            except OSError as exc:
+                raise BatchAborted(
+                    f"sheet {sheet}: could not read hopper status: {exc}"
+                ) from exc
+            if not more:
                 stopped = "hopper empty"
                 break
         log(f"  batch ended: {stopped}")
@@ -173,13 +251,7 @@ def scan_batch(
         # Terminate even if the batch failed. Without these the panel sits on
         # "Scanning..." and eventually reports the connection was lost -- and a
         # crashed handler is exactly when that happens.
-        #
-        # The e0 here starts a page with no paper behind it, which is how the
-        # scanner is told the batch is over; d6 then closes it.
-        for label, cdb in (
-            ("e0 end", [0xE0, 0, 0, 0, 0, 0]),
-            ("d6 finish", [0xD6, 0, 0, 0, 0, 0]),
-        ):
+        for label, cdb in TERMINATORS:
             try:
                 st, _ = s.scsi(bytes(cdb))
                 log(f"  {label:<10} {st}")
@@ -195,9 +267,17 @@ def scan_to_dir(
     prof_id: str = "",
     max_sheets: int = 100,
     skip_register: bool = False,
+    user_id: str = "",
     log: Callable[[str], None] = print,
 ) -> int:
-    """Full scan: register, select a profile, check for paper, scan."""
+    """Full scan: register, select a profile, check for paper, scan.
+
+    Returns the number of sides written, 0 when there was nothing to scan.
+    Raises BatchAborted when a batch started and did not finish cleanly.
+    `user_id` overrides the user the session acts as; blank reads it from the
+    scanner's profiles. Blank `prof_id` scans with a host profile, not the
+    cloud one that a ScanSnap Home setup lists first.
+    """
     s = Session(host, host_id)
     if skip_register:
         log("using the existing registration")
@@ -208,16 +288,16 @@ def scan_to_dir(
             return 0
         log("registered")
 
-    log(f"  session    {s.open_session()}")
+    log(f"  session    {s.open_session(user_id)}")
 
     prof = prof_id
     if not prof:
-        ps = s.profiles()
-        if not ps:
+        chosen = default_profile(s.profiles())
+        if not chosen:
             log("  could not read the profile list")
             return 0
-        prof = ps[0]["prof_id"]
-        log(f"  profile    {ps[0].get('prof_name')!r} ({prof})")
+        prof = chosen["prof_id"]
+        log(f"  profile    {chosen.get('prof_name')!r} ({prof})")
     log(f"  select     {s.select_profile(prof)}")
 
     if not hopper_has_paper(host, s.mac):

@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- **Network: only a complete batch is filed.** Over the network, a paper jam,
+  cover open or double feed returned the sides captured so far and the daemon
+  filed them as a finished document; a sheet missing its back, a `READ` that
+  failed, an image cut off before its EOI, a stalled read (returned as
+  status 0 with whatever had arrived) and a hopper check that failed or came
+  back short (read as "hopper empty") all did the same. Each now raises
+  `BatchAborted` from `scan_batch()`; `e0`/`d6` still go out, including
+  after a refused setup command, which used to leave the job open. Nothing
+  is published and the paper is still in the hopper. `panelbeater scan`
+  prints the reason and exits 1.
+- **Network: the session acts as a host profile's user and scans with a host
+  profile.** The same "Send to ScanSnap Cloud"-listed-first problem as the
+  USB fix below: blank `prof_id` selected `profiles[0]` and the session
+  quoted its user. Both now prefer a `prof_type` 0 profile, and the config's
+  `user_id` override is honoured on the network path too. The rule lives in
+  `profiles.py`, shared by both transports.
 - **USB: a fault no longer files a partial stack.** A paper jam, open cover,
   double feed, failed read or timeout before the hopper empties now raises
   `BatchAborted` from `scan_batch()` instead of returning the sides captured

@@ -54,8 +54,10 @@ DEFAULTS: dict[str, str] = {
     # Duplex scanning one-sided paper yields a blank reverse for every sheet.
     "blank_removal": "yes",
     "blank_threshold": "0.5",
-    # Which of the scanner's profiles to scan with. Blank uses the first one.
-    # `panelbeater status` lists them; the ids come from the scanner, not from here.
+    # Which of the scanner's profiles to scan with. Blank uses a host profile
+    # (prof_type 0), not the "Send to ScanSnap Cloud" one a ScanSnap Home setup
+    # lists first. `panelbeater status` lists them; the ids come from the
+    # scanner, not from here.
     "prof_id": "",
     # Safety cap on a single batch; the batch normally ends when the hopper
     # empties.
