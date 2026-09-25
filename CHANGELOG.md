@@ -17,6 +17,12 @@
   0x00 now ends the side too, trailing constant rows of any value are trimmed,
   and the JPEG carries the scan resolution so img2pdf makes an 8.7 in wide
   page instead of a 27 in one.
+- **USB: the panel is armed as a host profile's user, not the cloud
+  profile's.** A scanner set up with ScanSnap Home lists "Send to ScanSnap
+  Cloud" first; acting as its user made every scan a cloud job and left the
+  panel on an orange "!" ("The device is not responding") after each batch.
+  Profiles with `prof_type` 0 (a computer) are now preferred. `user_id` in
+  the config still overrides.
 - First tests: `tests/test_usb_scan_batch.py` drives the real `read_sheet()`
   and `scan_batch()` against a scripted fake of the USB transport.
 
