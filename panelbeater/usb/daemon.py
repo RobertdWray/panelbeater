@@ -250,13 +250,16 @@ def serve(cfg: Config, log=print) -> int:
     return 0
 
 
-def scan_once(cfg: Config, dev: Ix1500, log=print) -> None:
+def scan_once(cfg: Config, dev: Ix1500, log=print) -> int:
     """Scan the hopper, then hand the pages to a worker to assemble and name.
 
     The scan itself is synchronous: the scanner is waiting on us and a second
     press mid-scan would only confuse it. Post-processing is not -- OCR and a
     rename hook can take minutes, and the panel should be usable again as soon
     as the paper has gone through.
+
+    Returns the number of sides handed to post-processing: 0 means nothing
+    will be filed, whether the hopper was empty or the scan failed.
     """
     work = Path(tempfile.mkdtemp(prefix="panelbeater-"))
     try:
@@ -280,7 +283,7 @@ def scan_once(cfg: Config, dev: Ix1500, log=print) -> None:
     pages = sorted(str(p) for p in work.glob("page-*.jpg")) if sides else []
     if not pages:
         shutil.rmtree(work, ignore_errors=True)
-        return
+        return 0
 
     def finish():
         try:
@@ -291,3 +294,4 @@ def scan_once(cfg: Config, dev: Ix1500, log=print) -> None:
             shutil.rmtree(work, ignore_errors=True)
 
     threading.Thread(target=finish).start()
+    return len(pages)

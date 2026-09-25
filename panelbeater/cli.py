@@ -175,8 +175,9 @@ def scan_over_usb(cfg: Config) -> int:
     uid = cfg.get("user_id") or user_id_from_scanner(Panel(dev))
     if uid:
         arm(dev, uid)
-    scan_once(cfg, dev)
-    return 0
+    # Nothing scanned -- empty hopper or a failed batch -- is a failure for a
+    # command someone ran on purpose, the same as the network path's `return 1`.
+    return 0 if scan_once(cfg, dev) else 1
 
 
 def cmd_serve(args, cfg: Config) -> int:

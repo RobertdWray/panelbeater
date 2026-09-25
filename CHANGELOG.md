@@ -9,6 +9,8 @@
   sent to the scanner are unchanged; the sheet's "scan complete" still goes
   out so the panel does not stick on "Scanning…". Nothing is published, and
   the paper is still in the hopper for a rescan.
+- **`panelbeater scan` over USB exits 1 when nothing was scanned**, matching
+  the network path.
 - First tests: `tests/test_usb_scan_batch.py` drives the real `read_sheet()`
   and `scan_batch()` against a scripted fake of the USB transport.
 
