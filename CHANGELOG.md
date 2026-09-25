@@ -22,6 +22,12 @@
   once, at rest, before the batch. No READ is ever issued after an empty
   feed, which is the read that hangs. `docs/PROTOCOL.md` "Ending a batch" is
   corrected accordingly.
+- **Network: the daemon opens a panel session as soon as it is registered**,
+  and again after a boot notice or a lost scanner. A registration keeps the
+  panel alive but does not say whose profiles to show; without a session a
+  ScanSnap Home setup shows "Send to ScanSnap Cloud" and an orange "!" until
+  the first scan. After a power cycle the panel now comes back on the host
+  user's default profile by itself.
 - **Network: the session acts as a host profile's user and scans with a host
   profile.** The same "Send to ScanSnap Cloud"-listed-first problem as the
   USB fix below: blank `prof_id` selected `profiles[0]` and the session

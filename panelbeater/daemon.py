@@ -42,6 +42,7 @@ from .protocol import (
 )
 from .protocol import OP_REGISTER, PORT_REQUEST
 from .scanning import scan_to_dir
+from .session import Session
 
 
 def stamp() -> str:
@@ -65,6 +66,35 @@ def usb_cable_present() -> bool:
     return False
 
 
+def open_panel_session(host: str, host_id: str, user_id: str, log=print) -> bool:
+    """Tell the panel which user it acts for. Returns True if the scanner took it.
+
+    A registration keeps the panel alive; the session (subject 0x02) decides
+    whose profiles it shows and whose default is offered. With no session the
+    scanner falls back to its first user, which on a ScanSnap Home setup is
+    "Send to ScanSnap Cloud": the panel shows that profile and an orange "!"
+    ("The device is not responding") until the first scan opens a session.
+    Measured 2026-09-25: enrol + register left the "!" up; one open_session()
+    cleared it; a power cycle brought the cloud profile back. Blank `user_id`
+    means the host profile's user from the scanner's own list (profiles.py).
+    """
+    try:
+        s = Session(host, host_id)
+        uid = user_id or s.user_id()
+        if not uid:
+            log("  no user id in the scanner's profiles; panel session not opened")
+            return False
+        st = s.open_session(uid)
+    except OSError as exc:
+        log(f"  could not open the panel session: {exc}")
+        return False
+    if st != 0:
+        log(f"  panel session refused (status {st})")
+        return False
+    log(f"[{stamp()}] panel session opened as user {uid}")
+    return True
+
+
 def serve(cfg: Config, host: str, log=print) -> int:
     host_id = cfg.host_id
     hid = bytes.fromhex(host_id)
@@ -86,6 +116,10 @@ def serve(cfg: Config, host: str, log=print) -> int:
     # logged "cannot reach scanner" for ten minutes, decided that counted as
     # idle, and went dark against a scanner that was switched off.
     registered = [False]
+    # Opened once per registration lifetime: after the first successful
+    # registration, and again after a boot notice or a lost scanner, since a
+    # rebooted scanner has forgotten it.
+    session_open = [False]
     last_active = [time.monotonic()]
 
     def do_scan(source: str, paper: bool | None = None) -> None:
@@ -232,6 +266,7 @@ def serve(cfg: Config, host: str, log=print) -> int:
                 # hours.
                 if reregister.is_set():
                     reregister.clear()
+                    session_open[0] = False
                     wake("scanner rebooted")
                     continue
                 try:
@@ -285,6 +320,10 @@ def serve(cfg: Config, host: str, log=print) -> int:
                 if status == 0:
                     refusals[0] = 0  # quiet: this happens every interval
                     registered[0] = True
+                    if not session_open[0]:
+                        session_open[0] = open_panel_session(
+                            host, host_id, cfg.get("user_id"), log
+                        )
                 elif status is not None:
                     log(f"[{stamp()}] registration refused (status {status})")
                     refusals[0] += 1
@@ -303,6 +342,9 @@ def serve(cfg: Config, host: str, log=print) -> int:
                     log(f"[{stamp()}] no reply to registration")
             except OSError as exc:
                 registered[0] = False
+                session_open[0] = (
+                    False  # a scanner that went away may come back rebooted
+                )
                 log(f"[{stamp()}] cannot reach scanner: {exc}")
 
             # Poll for the button between registrations. Once a network host is
@@ -323,8 +365,10 @@ def serve(cfg: Config, host: str, log=print) -> int:
                 was_pressed = pressed
                 # A boot notice means the scanner just came up and belongs to
                 # nobody. Re-register at once; waiting out the interval is what
-                # loses the first press after a power cycle.
+                # loses the first press after a power cycle. It has also
+                # forgotten the session.
                 if reregister.is_set():
+                    session_open[0] = False
                     break
                 time.sleep(poll_ms / 1000.0)
             reregister.clear()
