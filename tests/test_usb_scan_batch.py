@@ -70,31 +70,48 @@ class FakeDev:
         self.current: dict[int, object] | None = None
         self.delivered: set[int] = set()
         self.pending_sense: bytes = sense_bytes()
+        self.fed_any = False
 
     # -- what the scanner "does" ---------------------------------------------
-    def hw_status(self, _page: int) -> tuple[bytes, int]:
+    @staticmethod
+    def _status(code: int = 0) -> bytes:
+        env = bytearray(13)
+        env[9] = code
+        return bytes(env)
+
+    def hw_status(self, _page: int) -> tuple[bytes, bytes]:
+        # Like the real unit: right at rest, and stuck at "empty" once any
+        # sheet has been fed, whatever is in the hopper.
         g = bytearray(8)
-        if not self.sheets and self.current is None:
-            g[3] |= 0x80  # hopper empty
-        return bytes(g), 0
+        if self.fed_any or not self.sheets:
+            g[3] |= 0x80
+        return bytes(g), self._status()
 
     def command(self, cdb: bytes, read_len: int = 0, payload: bytes | None = None):
         self.cdbs.append(bytes(cdb))
         op = cdb[0]
         if (op, cdb[1]) == FEED:
+            if not self.sheets:
+                self.pending_sense = sense_bytes(0x03, 0x80, 0x03)
+                return b"", self._status(0x02)  # CHECK CONDITION: nothing to feed
             self.current = self.sheets.pop(0)
             self.delivered = set()
+            self.fed_any = True
+            fault = self.current.get("feed_fault")
+            if fault is not None:
+                self.pending_sense = sense_bytes(0x03, 0x80, fault)
+                return b"", self._status(0x02)
         elif op == 0xF1 and cdb[1] == 0x10:  # poll a window before READ
             self.pending_sense = self._sense_for(cdb[2])
         elif op == REQUEST_SENSE:
-            return self.pending_sense, 0
+            return self.pending_sense, self._status()
         elif op == READ:
-            return self._read(cdb[5]), 0
+            return self._read(cdb[5]), self._status()
         elif (op, cdb[1]) == SCAN_COMPLETE:
             self.current = None
         elif op == 0xC2:  # GET_HW_STATUS inside setup()
-            return bytes(read_len), 0
-        return b"", 0
+            return bytes(read_len), self._status()
+        return b"", self._status()
 
     def _sense_for(self, window: int) -> bytes:
         if self.still_scanning:
@@ -177,12 +194,44 @@ def test_every_non_empty_fault_aborts(tmp_path, ascq, name):
         scanner.scan_batch(prefix)
 
 
-def test_hopper_empty_fault_is_a_clean_end_not_an_abort(tmp_path):
+def test_empty_hopper_on_the_first_sheet_feeds_nothing(tmp_path):
     scanner, dev, prefix = make_scanner([], tmp_path)
 
     assert scanner.scan_batch(prefix) == 0
+    assert dev.count(*FEED) == 0, "an empty-hopper press must not run the feeder"
     assert dev.count(*SCAN_COMPLETE) == 0
     assert scanner.last_fault == ASCQ_HOPPER_EMPTY
+
+
+def test_later_sheets_feed_even_though_the_hopper_sensor_says_empty(tmp_path):
+    """The sensor sticks at "empty" after the first sheet; the batch must not."""
+    scanner, dev, prefix = make_scanner([duplex(), duplex(), duplex()], tmp_path)
+
+    assert scanner.scan_batch(prefix) == 6
+    # 3 feeds that worked, then a 4th that the scanner refused (hopper empty).
+    assert dev.count(*FEED) == 4
+    assert dev.count(*SCAN_COMPLETE) == 3
+    assert scanner.last_fault == ASCQ_HOPPER_EMPTY
+
+
+def test_a_feed_that_fails_with_a_jam_aborts(tmp_path):
+    scanner, dev, prefix = make_scanner(
+        [duplex(), {**duplex(), "feed_fault": 0x01}], tmp_path
+    )
+
+    with pytest.raises(BatchAborted, match=r"sheet 2: paper jam"):
+        scanner.scan_batch(prefix)
+
+    assert dev.count(0x31, 0x02) == 1  # finish() still returns the panel
+
+
+def test_no_request_sense_between_a_good_feed_and_scan(tmp_path):
+    scanner, dev, prefix = make_scanner([duplex()], tmp_path)
+    scanner.scan_batch(prefix)
+
+    ops = [(c[0], c[1]) for c in dev.cdbs]
+    i = ops.index(FEED)
+    assert ops[i + 1] == (0x1B, 0), "SCAN must directly follow a successful feed"
 
 
 def test_timeout_waiting_for_a_side_aborts(tmp_path):

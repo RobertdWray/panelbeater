@@ -63,6 +63,10 @@ SIDE_NAMES = {WINDOW_FRONT: "front", WINDOW_BACK: "back"}
 # is the normal end of a batch; everything else stops the batch early.
 ASCQ_HOPPER_EMPTY = 0x03
 FAULT_NAMES = {0x01: "paper jam", 0x02: "cover open", 0x07: "double feed"}
+# Where the SCSI status lives in the 13-byte USB status envelope; 0 is GOOD,
+# 0x02 CHECK CONDITION. (transport.USB_STATUS_OFFSET, kept local so this
+# module does not import pyusb.)
+STATUS_BYTE = 9
 
 
 def fault_name(ascq: int) -> str:
@@ -179,21 +183,34 @@ class UsbScanner:
         # one-pixel stride error shears the page diagonally across 3500 rows.
         self.width_px = WINDOW_WIDTH_1200 * self.resolution // 1200
 
-    def start_sheet(self) -> int | None:
+    def start_sheet(self, first: bool = True) -> int | None:
         """Feed a sheet and start scanning it.
 
-        Returns None on success, or the ASCQ of the fault that stopped it.
-        Checks the hopper BEFORE feeding: afterwards "hopper empty" just means
-        that was the last sheet, and treating it as failure breaks single-sheet
-        loads. Nothing is sent between the feed and SCAN -- the gap in the
-        capture is OBJECT POSITION blocking while the sheet feeds, and slipping
-        a REQUEST SENSE in there earns a command-sequence error.
+        Returns None on success, or the ASCQ of the fault that stopped it --
+        ASCQ_HOPPER_EMPTY when there was nothing to feed.
+
+        Two ways to learn the hopper is empty, and only one survives the first
+        sheet. GET_HW_STATUS reads it correctly at rest, so the first sheet
+        checks it and an empty-hopper press feeds nothing. Once a sheet has
+        gone through, that bit stays at "empty" with paper plainly in the
+        hopper (measured for 3 s on an iX1500 with a second sheet loaded), so
+        later sheets feed unconditionally: an empty hopper answers OBJECT
+        POSITION with CHECK CONDITION in under a second and REQUEST SENSE says
+        03/80/03. Nothing is sent between a successful feed and SCAN -- the
+        gap in the capture is OBJECT POSITION blocking while the sheet feeds,
+        and slipping a REQUEST SENSE in there earns a command-sequence error
+        -- so sense is read only when the feed reported a problem.
         """
-        g, _ = self.dev.hw_status(0x30)
-        if len(g) > 3 and (g[3] & 0x80):
-            self.last_fault = 0x03
-            return 0x03
-        self._cmd([0x31, 0x01, 0, 0, 0, 0, 0, 0, 0, 0])  # OBJECT POSITION feed
+        if first:
+            g, _ = self.dev.hw_status(0x30)
+            if len(g) > 3 and (g[3] & 0x80):
+                self.last_fault = ASCQ_HOPPER_EMPTY
+                return ASCQ_HOPPER_EMPTY
+        _, status = self._cmd([0x31, 0x01, 0, 0, 0, 0, 0, 0, 0, 0])  # OBJECT POSITION feed
+        if len(status) > STATUS_BYTE and status[STATUS_BYTE] != 0:
+            key, asc, ascq, _, _ = self.sense()
+            self.last_fault = ascq if key == 0x03 and asc == 0x80 else 0xFF
+            return self.last_fault
         windows = (
             bytes([WINDOW_FRONT, WINDOW_BACK]) if self.duplex else bytes([WINDOW_FRONT])
         )
@@ -339,7 +356,7 @@ class UsbScanner:
         pages = 0
         try:
             for sheet in range(1, max_sheets + 1):
-                fault = self.start_sheet()
+                fault = self.start_sheet(first=sheet == 1)
                 if fault == ASCQ_HOPPER_EMPTY:
                     print(f"  sheet {sheet}: hopper empty")
                     break

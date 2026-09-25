@@ -23,6 +23,12 @@
   panel on an orange "!" ("The device is not responding") after each batch.
   Profiles with `prof_type` 0 (a computer) are now preferred. `user_id` in
   the config still overrides.
+- **USB: multi-sheet batches scan every sheet.** After the first sheet the
+  iX1500's hopper sensor stays at "empty" with paper still loaded, so every
+  batch stopped after one sheet and the rest fed through unscanned. Later
+  sheets are now fed without asking the sensor; an empty hopper answers the
+  feed with CHECK CONDITION and sense 03/80/03, which ends the batch. The
+  first sheet still checks the sensor, so an empty-hopper press feeds nothing.
 - First tests: `tests/test_usb_scan_batch.py` drives the real `read_sheet()`
   and `scan_batch()` against a scripted fake of the USB transport.
 
