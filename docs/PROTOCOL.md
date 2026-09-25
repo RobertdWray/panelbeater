@@ -341,13 +341,32 @@ for the scanner to abandon the job.
 ### Ending a batch
 
 The hopper-empty sense documented in sane-backends (key 0x3 / ASC 0x80 /
-ASCQ 0x03) **never arrives on this transport** — the key stays 0 with EOM set
-through the last sheet. Decide whether to continue by checking `GET_HW_STATUS`
-for paper **before** reading the next sheet, on a separate connection.
+ASCQ 0x03) does not arrive on the per-side `REQUEST SENSE` after a `READ` —
+there the key stays 0 with EOM set through the last sheet. It **does** arrive
+on a `REQUEST SENSE` issued straight after the `e0` that found no paper, and
+only there (measured on a second iX1500, 2026-09-25):
 
-Reading speculatively and stopping when the data comes back empty produces the
-right images but leaves the job open, and the panel then hangs on "Scanning…"
-even though `e0` and `d6` both return 0.
+| after `e0` | `e0` status | `e0` latency | `REQUEST SENSE` right after |
+|---|---|---|---|
+| a sheet fed | 0 | ~0.05 s | all zeros; the sheet then reads normally |
+| hopper empty | 0 | ~0.9 s | `f0 00 03 … 80 03`: key 3 / ASC 0x80 / ASCQ 0x03 |
+
+The sense is one-shot: a second `REQUEST SENSE` a second later reads zeros
+again. Reading sense between `e0` and the first `READ` does not disturb the
+sheet. So the loop is: `e0`, `REQUEST SENSE`; on 03/80/03 the batch is over
+(send the terminators), otherwise read the sides.
+
+**Do not decide from `GET_HW_STATUS` between sheets.** On the unit above the
+hopper-empty bit is right at rest and for about two seconds after a sheet has
+been read, then reads "empty" until the job closes, however much paper is
+loaded. A loop that checked it between sheets ended batches after whichever
+sheet happened to finish outside that window. Check it once, at rest, before
+the batch, so an empty-hopper press feeds nothing.
+
+Reading speculatively — a `READ` after an `e0` that fed nothing — never
+answers, and stopping on empty data leaves the job open with the panel on
+"Scanning…" even though `e0` and `d6` both return 0. The sense above is what
+replaces that read.
 
 Sense is still worth reading, to catch real faults:
 

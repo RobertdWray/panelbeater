@@ -80,14 +80,21 @@ SENSE_FAULTS = {
 
 
 def hopper_has_paper(host: str, mac: bytes) -> bool:
-    """Is another sheet waiting?
+    """Is there paper in the hopper? Ask ONLY before the batch, at rest.
 
     Asked on a SEPARATE connection. The scan connection has to carry the
     d5/d8/e9/d4 sequence and nothing in front of it, or d4 fails with -1.
 
+    Measured on an iX1500 (2026-09-25): the hopper-empty bit is right at
+    rest, and for about two seconds after a sheet has been read, and then it
+    reads "empty" until the job closes however much paper is loaded. Asking
+    it between sheets therefore ended batches after whichever sheet happened
+    to finish outside that window. Later sheets are fed blind and the sense
+    after the feed decides; see feed_sheet().
+
     Raises OSError when the answer is unknown. A failed or short reply used to
     read as "empty", which ended the batch cleanly and filed what had been
-    captured so far -- a Wi-Fi blip between sheets became a short document.
+    captured so far.
     """
     g = hw_status(host, mac)
     if len(g) < 5:
@@ -112,6 +119,42 @@ TERMINATORS = [
 # that yields only a front is a fault, not a one-sided page; if the block ever
 # becomes adjustable this list has to follow it.
 SIDES = ((0x00, "front", 0), (0x80, "back", 1))
+
+
+def feed_sheet(s: Session, sheet: int, log: Callable[[str], None]) -> bool:
+    """Feed the next sheet with e0. Returns False when the hopper was empty.
+
+    e0 answers status 0 whether or not there was paper (in about 0.05 s with a
+    sheet, about 0.9 s without), so the status says nothing. The REQUEST SENSE
+    straight after it does: 03/80/03 "hopper empty" when nothing fed, all
+    zeros when a sheet did, and it is one-shot -- a second sense a moment
+    later reads zeros again. PROTOCOL.md said this sense never arrives on the
+    network transport; it does, but only here, and only if asked before any
+    READ. A READ after an empty feed is the speculative read that never
+    answers and leaves the panel on "Scanning...". Reading sense between e0
+    and the first READ does not disturb the sheet (measured).
+    """
+    st, _ = s.scsi(bytes([0xE0, 0, 0, 0, 0, 0]))
+    log(f"  sheet {sheet} e0 START {st}")
+    if st != 0:
+        raise BatchAborted(f"sheet {sheet}: e0 refused (status {st})")
+    _, sense = s.scsi(bytes([0x03, 0, 0, 0, 0x12, 0]), 0x12)
+    d = decode_sense(sense)
+    if not d:
+        raise BatchAborted(
+            f"sheet {sheet}: no sense after the feed ({len(sense)} bytes)"
+        )
+    key, asc, ascq, _eom, _ili = d
+    if (key, asc, ascq) == SENSE_HOPPER_EMPTY:
+        return False
+    fault = SENSE_FAULTS.get((key, asc, ascq))
+    if fault:
+        raise BatchAborted(f"sheet {sheet}: {fault} on feed")
+    if key != 0:
+        raise BatchAborted(
+            f"sheet {sheet}: sense key {key:#x} asc {asc:#04x} ascq {ascq:#04x} on feed"
+        )
+    return True
 
 
 def read_sheet(
@@ -202,10 +245,12 @@ def scan_batch(
     profile and called connect().
 
     Only a complete batch returns: every fed sheet read on both sides, each
-    image ending in its EOI, and the batch ended by the hopper running empty
-    or by max_sheets. Anything else raises BatchAborted, so the caller files
-    nothing and the paper is still in the hopper for a rescan. The terminators
-    go out either way.
+    image ending in its EOI, and the batch ended by a feed that found the
+    hopper empty or by max_sheets. Anything else raises BatchAborted, so the
+    caller files nothing and the paper is still in the hopper for a rescan.
+    The terminators go out either way.
+
+    The hopper sensor is not consulted here; see hopper_has_paper().
     """
     pages = 0
     try:
@@ -222,30 +267,16 @@ def scan_batch(
             # e0 starts THIS sheet, not the batch. The USB capture reissues the
             # equivalent (SET_WINDOW + OBJ_POS + SCAN) for every page. Sending
             # one e0 for the whole batch makes sheet 2 read back 2 bytes with
-            # paper still in the hopper.
-            st, _ = s.scsi(bytes([0xE0, 0, 0, 0, 0, 0]))
-            log(f"  sheet {sheet} e0 START {st}")
-            if st != 0:
-                raise BatchAborted(f"sheet {sheet}: e0 refused (status {st})")
-
+            # paper still in the hopper. Whether it fed anything is decided
+            # from the sense right after it, never from a READ.
+            if not feed_sheet(s, sheet, log):
+                stopped = "hopper empty"
+                break
             written = read_sheet(s, sheet, out_prefix, pages, log)
             if not written:
                 stopped = "hopper empty"
                 break
             pages += written
-
-            # Decided BEFORE reading the next sheet, never after: a speculative
-            # empty read is what wedges the panel. An unreadable answer is not
-            # "empty" -- the sheets so far would be filed as the whole document.
-            try:
-                more = hopper_has_paper(s.host, s.mac)
-            except OSError as exc:
-                raise BatchAborted(
-                    f"sheet {sheet}: could not read hopper status: {exc}"
-                ) from exc
-            if not more:
-                stopped = "hopper empty"
-                break
         log(f"  batch ended: {stopped}")
     finally:
         # Terminate even if the batch failed. Without these the panel sits on

@@ -3,10 +3,15 @@
 """The network scan_batch() must never hand back an incomplete batch as a finished one.
 
 The fake below stands in for Session at the scsi() boundary, so the real
-scan_batch() runs its setup, per-sheet reads, sense decoding and terminators.
-It is scripted per sheet: each entry says what the scanner returns for the
-front and the back. The hopper check goes through the real hopper_has_paper()
-with hw_status() faked, so its strictness is under test too.
+scan_batch() runs its setup, per-sheet feeds, reads, sense decoding and
+terminators. It is scripted per sheet: each entry says what the scanner
+returns for the front and the back. Like the real unit, an e0 into an empty
+hopper answers status 0 and the next REQUEST SENSE says 03/80/03, once.
+
+The hopper sensor is deliberately unavailable inside scan_batch(): on the
+iX1500 this was measured on, GET_HW_STATUS reports "empty" from about two
+seconds after the first sheet is read until the job closes, whatever is
+loaded. Only scan_to_dir() may ask it, once, at rest, before the batch.
 """
 
 from __future__ import annotations
@@ -50,9 +55,12 @@ class FakeSession:
     host = "192.0.2.1"
     mac = b"\x00" * 6
 
-    def __init__(self, sheets, e0_status=None, setup_status=None, sense=None):
+    def __init__(
+        self, sheets, e0_status=None, e0_sense=None, setup_status=None, sense=None
+    ):
         self.sheets = list(sheets)
         self.e0_status = dict(e0_status or {})  # sheet number -> status
+        self.e0_sense = dict(e0_sense or {})  # sheet number -> sense after its e0
         self.setup_status = dict(setup_status or {})  # cdb[0] -> status
         self.sense_override = dict(sense or {})  # (sheet, side) -> sense bytes
         self.cdbs: list[bytes] = []
@@ -69,8 +77,13 @@ class FakeSession:
             if self.sheets:
                 self.sheet += 1
                 self.current = self.sheets.pop(0)
+                self.pending_sense = self.e0_sense.get(self.sheet, sense_bytes())
                 return self.e0_status.get(self.sheet, 0), b""
-            return 0, b""  # the terminating e0
+            # No paper: the real unit still answers 0 (after ~0.9 s instead of
+            # 0.05 s) and the next REQUEST SENSE reports hopper empty, once.
+            self.current = None
+            self.pending_sense = sense_bytes(0x03, 0x80, HOPPER_EMPTY)
+            return 0, b""
         if op == READ and cdb[2] == 0:
             side = cdb[5]
             plan = self.current[side] if self.current else Nothing
@@ -83,7 +96,8 @@ class FakeSession:
                 return 0, JPEG
             return 0, b""  # Nothing, or a fault: no image came
         if op == REQUEST_SENSE:
-            return 0, self.pending_sense
+            reply, self.pending_sense = self.pending_sense, sense_bytes()  # one-shot
+            return 0, reply
         return 0, b""
 
     def _sense_for(self, side, plan) -> bytes:
@@ -103,30 +117,15 @@ def duplex(front=Good, back=Good) -> dict[int, object]:
 
 @pytest.fixture
 def hopper(monkeypatch):
-    """Fake hw_status(): scripted replies first, then 'paper while sheets remain'."""
-    script: list[object] = []
-    holder: dict[str, FakeSession] = {}
+    """Inside scan_batch() the hopper sensor must never be consulted: it lies
+    once a sheet has fed. Any call is a test failure."""
 
-    def fake_hw_status(host, mac, length=0x30):
-        if script:
-            item = script.pop(0)
-            if isinstance(item, BaseException):
-                raise item
-            return item
-        g = bytearray(0x30)
-        if not holder["s"].sheets:
-            g[3] |= 0x80
-        return bytes(g)
+    def never(host, mac, length=0x30):
+        raise AssertionError("scan_batch() consulted the hopper sensor mid-batch")
 
-    monkeypatch.setattr(scanning, "hw_status", fake_hw_status)
+    monkeypatch.setattr(scanning, "hw_status", never)
     monkeypatch.setattr(scanning, "SETUP_SETTLE_S", 0)
-
-    def bind(s: FakeSession, *replies):
-        holder["s"] = s
-        script.extend(replies)
-        return s
-
-    return bind
+    return lambda s: s
 
 
 def run(s: FakeSession, tmp_path: Path, max_sheets: int = 100) -> int:
@@ -144,7 +143,24 @@ def test_clean_two_sheet_batch_files_four_sides_and_terminates_once(tmp_path, ho
     s = hopper(FakeSession([duplex(), duplex()]))
     assert run(s, tmp_path) == 4
     assert pages_on_disk(tmp_path) == [f"page-000{i}.jpg" for i in range(1, 5)]
-    assert s.count(E0) == 3  # two sheets, then the terminating e0
+    assert s.count(E0) == 4  # two sheets, the feed that found the hopper empty, e0 end
+    assert s.count(D6) == 1
+
+
+def test_later_sheets_are_fed_without_consulting_the_hopper_sensor(tmp_path, hopper):
+    """Three sheets, six sides, four feeds; the hopper fixture raises if asked."""
+    s = hopper(FakeSession([duplex(), duplex(), duplex()]))
+    assert run(s, tmp_path) == 6
+    assert s.count(E0) == 5
+    assert s.count(D6) == 1
+
+
+def test_fault_reported_on_the_feed_aborts(tmp_path, hopper):
+    s = hopper(
+        FakeSession([duplex(), duplex()], e0_sense={2: sense_bytes(0x03, 0x80, JAM)})
+    )
+    with pytest.raises(BatchAborted, match=r"sheet 2: paper jam on feed"):
+        run(s, tmp_path)
     assert s.count(D6) == 1
 
 
@@ -156,9 +172,10 @@ def test_hopper_empty_sense_on_an_unread_sheet_ends_the_batch_cleanly(tmp_path, 
     assert s.count(D6) == 1
 
 
-def test_max_sheets_ends_the_batch_cleanly(tmp_path, hopper):
+def test_max_sheets_ends_the_batch_cleanly_without_another_feed(tmp_path, hopper):
     s = hopper(FakeSession([duplex(), duplex(), duplex()]))
     assert run(s, tmp_path, max_sheets=2) == 4
+    assert s.count(E0) == 3  # two sheets, then e0 end; no third feed
 
 
 # -- faults abort, and the terminators still go out -----------------------------
@@ -242,20 +259,6 @@ def test_setup_failure_aborts_and_still_terminates(tmp_path, hopper):
     assert s.count(D6) == 1
 
 
-def test_hopper_status_error_between_sheets_aborts(tmp_path, hopper):
-    s = hopper(FakeSession([duplex(), duplex()]), OSError("connection reset"))
-    with pytest.raises(
-        BatchAborted, match=r"sheet 1: could not read hopper status: connection reset"
-    ):
-        run(s, tmp_path)
-
-
-def test_short_hopper_status_reply_aborts_rather_than_meaning_empty(tmp_path, hopper):
-    s = hopper(FakeSession([duplex(), duplex()]), b"\x00\x00")
-    with pytest.raises(BatchAborted, match=r"sheet 1: could not read hopper status"):
-        run(s, tmp_path)
-
-
 # -- scan_to_dir(): session user and profile -----------------------------------
 
 CLOUD = {
@@ -323,6 +326,25 @@ def test_scan_to_dir_defaults_to_a_host_profile_not_the_cloud_one(recording):
 def test_scan_to_dir_honours_an_explicit_profile(recording):
     _, s = recording(prof_id="CLOUD")
     assert s.selected == "CLOUD"
+
+
+def test_scan_to_dir_refuses_to_start_when_the_hopper_status_is_unreadable(
+    recording, monkeypatch
+):
+    def boom(*a, **k):
+        raise OSError("connection reset")
+
+    monkeypatch.setattr(scanning, "hw_status", boom)
+    with pytest.raises(OSError, match="connection reset"):
+        recording()
+
+
+def test_scan_to_dir_treats_a_short_hopper_reply_as_unreadable_not_empty(
+    recording, monkeypatch
+):
+    monkeypatch.setattr(scanning, "hw_status", lambda *a, **k: b"\x00\x00")
+    with pytest.raises(OSError, match="too short"):
+        recording()
 
 
 # -- the callers publish nothing on an abort -------------------------------------

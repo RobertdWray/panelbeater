@@ -12,6 +12,16 @@
   after a refused setup command, which used to leave the job open. Nothing
   is published and the paper is still in the hopper. `panelbeater scan`
   prints the reason and exits 1.
+- **Network: multi-sheet batches no longer stop early.** The loop asked
+  `GET_HW_STATUS` for paper between sheets; on the unit this was measured on
+  that bit reads "empty" from about two seconds after a sheet is read until
+  the job closes, so batches ended after whichever sheet finished outside
+  that window (three sheets gave four sides). Later sheets are now fed with
+  `e0` and the `REQUEST SENSE` right after it decides: 03/80/03 ends the
+  batch, zeros means a sheet fed, anything else aborts. The sensor is read
+  once, at rest, before the batch. No READ is ever issued after an empty
+  feed, which is the read that hangs. `docs/PROTOCOL.md` "Ending a batch" is
+  corrected accordingly.
 - **Network: the session acts as a host profile's user and scans with a host
   profile.** The same "Send to ScanSnap Cloud"-listed-first problem as the
   USB fix below: blank `prof_id` selected `profiles[0]` and the session
